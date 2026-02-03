@@ -1,0 +1,21 @@
+# Warmpath router configuration.
+#
+# Matches the R0.1 surface. Policy selection, block index backend, cache and
+# balance thresholds, hedging, and health checking get their own sections as
+# the releases that read them land.
+
+[server]
+bind = "0.0.0.0:8080"
+# Request bodies are buffered so the prompt builder can read the full
+# conversation from R0.3 onward.
+max_request_bytes = 4194304
+
+[upstream]
+connect_timeout_ms = 2000
+# Read timeout, not a total-request timeout: a long generation is healthy, a
+# stalled stream is not.
+read_timeout_ms = 60000
+
+[[workers]]
+name = "w0"
+url = "http://127.0.0.1:8001"

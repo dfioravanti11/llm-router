@@ -1,0 +1,8 @@
+/target
+.env
+.cache
+summary.rtf
+
+project_spec.md
+writing_prompt.md
+CLAUDE.md

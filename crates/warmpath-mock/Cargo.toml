@@ -1,0 +1,24 @@
+[package]
+name = "warmpath-mock"
+description = "Mock inference worker for GPU-free development of warmpath"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+async-stream = "0.3.6"
+axum = "0.8.9"
+bytes = "1.12.1"
+clap = { version = "4.5.61", features = ["derive"] }
+futures-util = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
