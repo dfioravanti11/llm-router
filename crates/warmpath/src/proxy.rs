@@ -11,11 +11,12 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::StreamExt;
 
 use crate::error::ProxyError;
+use crate::metrics::WorkerMetrics;
 use crate::AppState;
 
 /// Header carrying the id assigned at ingress. Sent upstream and returned to
@@ -50,17 +51,23 @@ pub async fn proxy(
         .and_then(|value| value.parse::<usize>().ok())
     {
         if declared > state.max_request_bytes {
+            state.metrics.record_rejection();
             return Err(ProxyError::BodyTooLarge {
                 limit: state.max_request_bytes,
             });
         }
     }
 
-    let body_bytes = axum::body::to_bytes(body, state.max_request_bytes)
-        .await
-        .map_err(|err| ProxyError::RequestBody(err.to_string()))?;
+    let body_bytes = match axum::body::to_bytes(body, state.max_request_bytes).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            state.metrics.record_rejection();
+            return Err(ProxyError::RequestBody(err.to_string()));
+        }
+    };
 
-    let worker = state.pool.pick();
+    let choice = state.pool.pick();
+    let worker = choice.worker;
     let url = worker.endpoint(&path_and_query);
 
     let mut upstream_headers = HeaderMap::with_capacity(parts.headers.len() + 1);
@@ -79,7 +86,8 @@ pub async fn proxy(
     );
 
     let dispatched_at = Instant::now();
-    let upstream = state
+    choice.metrics.record_dispatch();
+    let upstream = match state
         .pool
         .client()
         .request(parts.method.clone(), &url)
@@ -87,10 +95,16 @@ pub async fn proxy(
         .body(body_bytes)
         .send()
         .await
-        .map_err(|source| ProxyError::Upstream {
-            worker: worker.name.clone(),
-            source,
-        })?;
+    {
+        Ok(response) => response,
+        Err(source) => {
+            choice.metrics.record_failure();
+            return Err(ProxyError::Upstream {
+                worker: worker.name.clone(),
+                source,
+            });
+        }
+    };
 
     let status = upstream.status();
     let mut response_headers = HeaderMap::with_capacity(upstream.headers().len() + 2);
@@ -105,6 +119,7 @@ pub async fn proxy(
     let guard = StreamGuard {
         request_id: request_id.clone(),
         worker: worker.name.clone(),
+        metrics: choice.metrics.clone(),
         dispatched_at,
         finished: false,
     };
@@ -148,6 +163,27 @@ pub async fn health() -> &'static str {
     "ok"
 }
 
+pub async fn metrics(State(state): State<AppState>) -> Response {
+    match state.metrics.encode() {
+        Ok(body) => (
+            [(
+                header::CONTENT_TYPE,
+                "application/openmetrics-text; version=1.0.0; charset=utf-8",
+            )],
+            body,
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::error!(error = %err, "failed to encode metrics");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to encode metrics",
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Tracks the fate of one streamed response.
 ///
 /// Dropping this without a terminal call means the body was never finished,
@@ -155,12 +191,15 @@ pub async fn health() -> &'static str {
 struct StreamGuard {
     request_id: String,
     worker: String,
+    metrics: WorkerMetrics,
     dispatched_at: Instant,
     finished: bool,
 }
 
 impl StreamGuard {
     fn record_first_byte(&self) {
+        self.metrics
+            .record_first_byte(self.dispatched_at.elapsed().as_secs_f64());
         tracing::debug!(
             request_id = %self.request_id,
             worker = %self.worker,
@@ -171,6 +210,8 @@ impl StreamGuard {
 
     fn record_completion(&mut self) {
         self.finished = true;
+        self.metrics
+            .record_completion(self.dispatched_at.elapsed().as_secs_f64());
         tracing::info!(
             request_id = %self.request_id,
             worker = %self.worker,
@@ -181,6 +222,7 @@ impl StreamGuard {
 
     fn record_failure(&mut self, error: &reqwest::Error) {
         self.finished = true;
+        self.metrics.record_failure();
         tracing::warn!(
             request_id = %self.request_id,
             worker = %self.worker,
@@ -193,6 +235,7 @@ impl StreamGuard {
 impl Drop for StreamGuard {
     fn drop(&mut self) {
         if !self.finished {
+            self.metrics.record_cancellation();
             tracing::info!(
                 request_id = %self.request_id,
                 worker = %self.worker,

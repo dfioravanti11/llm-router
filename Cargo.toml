@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/warmpath", "crates/warmpath-mock"]
+members = ["crates/warmpath", "crates/warmpath-bench", "crates/warmpath-mock"]
 resolver = "2"
 
 [workspace.package]

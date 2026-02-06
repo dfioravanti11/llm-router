@@ -29,6 +29,10 @@ struct Args {
     /// Tokens to emit when the request does not set `max_tokens`.
     #[arg(long, default_value_t = 32)]
     default_max_tokens: usize,
+
+    /// Requests served at once. Anything beyond this queues.
+    #[arg(long, default_value_t = 256)]
+    max_concurrency: usize,
 }
 
 #[tokio::main]
@@ -41,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
         time_to_first_token: Duration::from_millis(args.ttft_ms),
         inter_token_delay: Duration::from_millis(args.inter_token_ms),
         default_max_tokens: args.default_max_tokens,
+        max_concurrency: args.max_concurrency,
     });
 
     let listener = TcpListener::bind(args.bind)

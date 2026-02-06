@@ -1,8 +1,8 @@
 # Warmpath router configuration.
 #
-# Matches the R0.1 surface. Policy selection, block index backend, cache and
-# balance thresholds, hedging, and health checking get their own sections as
-# the releases that read them land.
+# Matches the R0.2 surface. Block index backend, cache and balance thresholds,
+# hedging, and health checking get their own sections as the releases that read
+# them land.
 
 [server]
 bind = "0.0.0.0:8080"
@@ -15,6 +15,11 @@ connect_timeout_ms = 2000
 # Read timeout, not a total-request timeout: a long generation is healthy, a
 # stalled stream is not.
 read_timeout_ms = 60000
+
+[routing]
+# `round-robin` rotates evenly and ignores cache state; it is the baseline every
+# later policy is measured against. `first` pins all traffic to one worker.
+policy = "round-robin"
 
 [[workers]]
 name = "w0"

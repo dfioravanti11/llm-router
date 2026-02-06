@@ -2,10 +2,11 @@
 
 > Update this file whenever a milestone's exit criteria are met, scope changes, or the "what's next" changes. Milestones and exit criteria are defined in `project_spec.md` §3 (Release Roadmap) — this file tracks progress against them, it doesn't redefine them.
 
-## Current phase: R0.1 complete, starting R0.2
+## Current phase: R0.2 complete, starting R0.3
 
-The router is a correct streaming proxy over a mock worker. No prompt builder,
-no block index, no routing policy yet.
+The router is a correct streaming proxy with baseline routing policies and
+Prometheus metrics, and the measurement harness is in place. No prompt builder
+and no block index yet.
 
 ## Milestones
 
@@ -14,8 +15,8 @@ Each release is a theme + exit criterion + demo artifact, not a date. GPU is req
 | Release | Theme | Exit criterion | Status |
 |---|---|---|---|
 | R0.1 | Skeleton — correct proxy, does nothing clever | Client disconnect provably frees the worker slot; SSE bytes match upstream exactly | Done |
-| R0.2 | Honest measurement — the harness, before any policy | Baseline p99 TTFT with CI from ≥3 runs, reproducible by one command; open-vs-closed-loop coordinated-omission demo | In progress |
-| R0.3 | The core idea — prefix-affinity routing | First affinity-vs-round-robin comparison chart with CIs on mock workers; hash-chain correctness test passing | Not started |
+| R0.2 | Honest measurement — the harness, before any policy | Baseline p99 TTFT with CI from ≥3 runs, reproducible by one command; open-vs-closed-loop coordinated-omission demo | Done |
+| R0.3 | The core idea — prefix-affinity routing | First affinity-vs-round-robin comparison chart with CIs on mock workers; hash-chain correctness test passing | In progress |
 | R0.4 | Load-aware and session-aware | A workload where pure affinity loses and balanced affinity wins, documented | Not started |
 | R0.5 | First contact with reality (real vLLM) | Real-hardware chart matching/diverging from mock result; predicted-vs-actual hit-rate discrepancy quantified | Not started |
 | R0.6 | Reliability | Chaos test: zero dropped/corrupted responses across repeated worker kills; hedging improves p99.9 measurably | Not started |
@@ -38,25 +39,44 @@ Each release is a theme + exit criterion + demo artifact, not a date. GPU is req
   - Both R0.1 exit criteria are covered by tests: SSE bytes proxied are
     byte-identical to the worker's own output, and a client that hangs up
     mid-stream frees the worker slot.
-- No routing, index, or benchmark code yet.
+- **R0.2 shipped.** The measurement harness, before the policy it will judge.
+  - `warmpath-bench`: open-loop Poisson schedule computed before the run
+    starts, intended-time latency accounting, warmup exclusion, HdrHistogram
+    summaries, per-request JSONL, run reports carrying config and seed and git
+    SHA, and median plus 95% confidence intervals across runs.
+  - Every request timed against both the intended and the actual dispatch time,
+    so the coordinated-omission gap comes out of any run.
+  - A run whose generator fell behind its own schedule is marked invalid and
+    excluded from its campaign, with the reason recorded.
+  - Router: Prometheus metrics at `/metrics`, plus `round-robin` and `first`
+    policies under a `[routing]` config section.
+  - Mock worker: bounded concurrency with real queueing.
+  - First measured finding in `RESULTS.md`, reproducible with `make co-demo`.
 
 ## What's next
 
-**R0.2 — Honest measurement.** The harness ships before any policy, because a
-baseline captured by a different harness is not a baseline.
+**R0.3 — Prefix-affinity routing.** The core idea, now that there is a harness
+able to judge it.
 
-1. `warmpath-bench` as a standalone binary against any OpenAI-compatible
-   endpoint: open-loop Poisson arrival schedule computed up front, latency
-   recorded as `t_response − t_intended`, generator-side saturation detection.
-2. HdrHistogram recording, warmup exclusion, per-request JSONL, run manifests
-   carrying config, seed, and git SHA.
-3. Prometheus metrics in the router and a Grafana dashboard as JSON.
-4. Round-robin baseline captured with confidence intervals across ≥3 runs.
-5. The open-loop vs. deliberately closed-loop comparison on one workload,
-   showing the coordinated-omission gap.
+1. Prompt builder: render the full conversation through the model's chat
+   template, tokenize with the HF `tokenizers` crate, compute a
+   vLLM-compatible block hash chain at 16-token granularity. Building from only
+   the latest message is a known bug class in this space and the reason the
+   full render is non-negotiable.
+2. Approximate block index: radix tree over block-hash sequences with
+   per-node worker sets, LRU eviction against a per-worker block budget, behind
+   the trait the event-driven backend will also implement at R0.7.
+3. In-flight block reservation, so two requests with the same long prefix
+   arriving milliseconds apart do not both score as misses.
+4. `prefix-affinity` and `prefix-affinity-balanced` policies with cache and
+   balance thresholds.
+5. Workload shapes with real prefix sharing in `warmpath-bench`, which R0.2
+   deliberately left out.
+6. A hash-chain correctness test, and the first affinity-versus-round-robin
+   comparison with confidence intervals.
 
-Per the spec's build philosophy: plumbing can be agent-assisted aggressively;
-the benchmark statistics get written and understood line by line.
+Per the spec's build philosophy: the block index and the routing policy get
+written and understood line by line.
 
 ## Open risks to watch
 

@@ -1,4 +1,4 @@
-.PHONY: help build test fmt fmt-check lint check run-mock run clean
+.PHONY: help build test fmt fmt-check lint check run-mock run bench co-demo clean
 
 help:
 	@echo "build      compile the workspace"
@@ -9,6 +9,8 @@ help:
 	@echo "check      fmt-check + lint + test, the same gate CI runs"
 	@echo "run-mock   start one mock worker on 127.0.0.1:8001"
 	@echo "run        start the router with config/warmpath.toml"
+	@echo "bench      three open-loop runs against a running router"
+	@echo "co-demo    the coordinated-omission comparison, start to finish"
 
 build:
 	cargo build --workspace
@@ -32,6 +34,16 @@ run-mock:
 
 run:
 	cargo run -p warmpath -- --config config/warmpath.toml
+
+# Expects a router already listening on 127.0.0.1:8080.
+bench:
+	cargo run --release -p warmpath-bench -- run \
+	  --target http://127.0.0.1:8080 \
+	  --rate 50 --duration 30 --warmup 5 --runs 3 \
+	  --out results/baseline
+
+co-demo:
+	./scripts/co-demo.sh
 
 clean:
 	cargo clean

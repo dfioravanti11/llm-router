@@ -1,6 +1,6 @@
 [package]
-name = "warmpath"
-description = "KV-cache-aware LLM inference router"
+name = "warmpath-bench"
+description = "Open-loop load generator and statistics harness for OpenAI-compatible endpoints"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,22 +12,19 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-async-stream = "0.3.6"
-axum = "0.8.9"
 bytes = "1.12.1"
 clap = { version = "4.5.61", features = ["derive"] }
 futures-util = "0.3.34"
-http = "1.5.0"
-prometheus-client = "0.25.0"
+hdrhistogram = "7.5.4"
 reqwest = { version = "0.13.3", default-features = false, features = ["stream", "rustls", "http2", "charset"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
-toml = "1.0.7"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
-reqwest = { version = "0.13.3", default-features = false, features = ["stream", "json"] }
+axum = "0.8.9"
+tempfile = "3.27.0"
+warmpath = { path = "../warmpath" }
 warmpath-mock = { path = "../warmpath-mock" }

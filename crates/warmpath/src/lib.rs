@@ -1,10 +1,12 @@
 //! Warmpath: a KV-cache-aware router for LLM inference fleets.
 //!
-//! R0.1 is a correct streaming proxy and nothing more. There is no prompt
-//! builder, no block index, and no routing policy yet.
+//! R0.2 is a correct streaming proxy with baseline routing policies and
+//! Prometheus metrics. There is no prompt builder and no block index yet;
+//! those arrive with prefix affinity in R0.3.
 
 pub mod config;
 pub mod error;
+pub mod metrics;
 pub mod proxy;
 pub mod worker;
 
@@ -15,12 +17,14 @@ use axum::routing::{get, post};
 use axum::Router;
 
 pub use config::Config;
+pub use metrics::Metrics;
 pub use worker::WorkerPool;
 
 /// Shared state handed to every request. Cheap to clone.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: Arc<WorkerPool>,
+    pub metrics: Arc<Metrics>,
     pub request_ids: Arc<RequestIds>,
     pub max_request_bytes: usize,
 }
@@ -43,14 +47,17 @@ impl RequestIds {
 
 /// Build the router's HTTP surface from a validated config.
 pub fn router(config: &Config) -> anyhow::Result<Router> {
+    let metrics = Arc::new(Metrics::new());
     let state = AppState {
-        pool: Arc::new(WorkerPool::new(config)?),
+        pool: Arc::new(WorkerPool::new(config, &metrics)?),
+        metrics,
         request_ids: Arc::new(RequestIds::default()),
         max_request_bytes: config.server.max_request_bytes,
     };
 
     Ok(Router::new()
         .route("/health", get(proxy::health))
+        .route("/metrics", get(proxy::metrics))
         .route("/v1/chat/completions", post(proxy::proxy))
         .route("/v1/completions", post(proxy::proxy))
         .with_state(state))

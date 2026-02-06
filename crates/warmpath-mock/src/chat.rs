@@ -92,7 +92,7 @@ async fn complete(
     let config = state.config();
     let model = request.model.unwrap_or_else(|| config.model.clone());
     let token_count = request.max_tokens.unwrap_or(config.default_max_tokens);
-    let slot = state.admit();
+    let slot = state.admit().await;
 
     if request.stream {
         Ok(stream_response(

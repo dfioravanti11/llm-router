@@ -18,7 +18,42 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub upstream: UpstreamConfig,
+    #[serde(default)]
+    pub routing: RoutingConfig,
     pub workers: Vec<WorkerConfig>,
+}
+
+/// Which worker a request goes to.
+///
+/// R0.2 carries only the baselines a later policy has to beat. Prefix affinity
+/// arrives in R0.3, and the load-aware variants in R0.4.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Policy {
+    /// Always the first configured worker. Useful when a run must pin all
+    /// traffic to one worker.
+    First,
+    /// Even rotation over the configured workers, ignoring load and cache
+    /// state. This is the baseline every later policy is measured against.
+    #[default]
+    RoundRobin,
+}
+
+impl Policy {
+    /// Stable name used as a metric label and in run manifests.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Policy::First => "first",
+            Policy::RoundRobin => "round-robin",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingConfig {
+    #[serde(default)]
+    pub policy: Policy,
 }
 
 #[derive(Debug, Clone, Deserialize)]

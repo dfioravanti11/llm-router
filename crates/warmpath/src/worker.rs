@@ -1,11 +1,15 @@
-//! Worker pool.
+//! Worker pool and routing policy.
 //!
-//! R0.1 tracks only identity and a shared HTTP client. Health state, queue
-//! depth, KV pressure, and circuit-breaker state land in R0.4 and R0.6.
+//! R0.2 tracks identity, a shared HTTP client, and the two baseline policies.
+//! Health state, queue depth, KV pressure, and circuit-breaker state land in
+//! R0.4 and R0.6.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Context;
 
-use crate::config::{Config, WorkerConfig};
+use crate::config::{Config, Policy, WorkerConfig};
+use crate::metrics::{Metrics, WorkerMetrics};
 
 #[derive(Debug, Clone)]
 pub struct Worker {
@@ -33,14 +37,26 @@ impl Worker {
     }
 }
 
+/// The outcome of one routing decision: which worker, and the metric handles
+/// already resolved for it.
+pub struct Choice<'a> {
+    pub worker: &'a Worker,
+    pub metrics: &'a WorkerMetrics,
+}
+
 #[derive(Debug)]
 pub struct WorkerPool {
     workers: Vec<Worker>,
+    /// Metric handles, indexed in step with `workers`.
+    worker_metrics: Vec<WorkerMetrics>,
     client: reqwest::Client,
+    policy: Policy,
+    /// Rotation cursor for `round-robin`.
+    cursor: AtomicUsize,
 }
 
 impl WorkerPool {
-    pub fn new(config: &Config) -> anyhow::Result<Self> {
+    pub fn new(config: &Config, metrics: &Metrics) -> anyhow::Result<Self> {
         config.validate()?;
 
         let client = reqwest::Client::builder()
@@ -52,20 +68,39 @@ impl WorkerPool {
             .build()
             .context("failed to build the upstream HTTP client")?;
 
+        let policy = config.routing.policy;
+        let workers: Vec<Worker> = config.workers.iter().map(Worker::new).collect();
+        let worker_metrics = workers
+            .iter()
+            .map(|worker| metrics.for_worker(&worker.name, policy.as_str()))
+            .collect();
+
         Ok(Self {
-            workers: config.workers.iter().map(Worker::new).collect(),
+            workers,
+            worker_metrics,
             client,
+            policy,
+            cursor: AtomicUsize::new(0),
         })
     }
 
     /// Choose the worker for a request.
     ///
-    /// R0.1 has no policy engine, so the first configured worker always wins.
-    /// The method exists so the seam is in place for R0.3 and so the proxy path
-    /// never grows a hardcoded index. `WorkerPool::new` rejects an empty worker
-    /// list, so the slice is never empty here.
-    pub fn pick(&self) -> &Worker {
-        &self.workers[0]
+    /// Neither policy here looks at cache state or load, which is the point:
+    /// they are the baselines R0.3 has to beat. `WorkerPool::new` rejects an
+    /// empty worker list, so the index is always in range.
+    pub fn pick(&self) -> Choice<'_> {
+        let index = match self.policy {
+            Policy::First => 0,
+            // Relaxed ordering is enough: the counter only has to advance, and
+            // no other memory is published through it.
+            Policy::RoundRobin => self.cursor.fetch_add(1, Ordering::Relaxed) % self.workers.len(),
+        };
+
+        Choice {
+            worker: &self.workers[index],
+            metrics: &self.worker_metrics[index],
+        }
     }
 
     pub fn client(&self) -> &reqwest::Client {
@@ -75,11 +110,31 @@ impl WorkerPool {
     pub fn workers(&self) -> &[Worker] {
         &self.workers
     }
+
+    pub fn policy(&self) -> Policy {
+        self.policy
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{RoutingConfig, ServerConfig, UpstreamConfig};
+
+    fn pool(policy: Policy, worker_count: usize) -> WorkerPool {
+        let config = Config {
+            server: ServerConfig::default(),
+            upstream: UpstreamConfig::default(),
+            routing: RoutingConfig { policy },
+            workers: (0..worker_count)
+                .map(|index| WorkerConfig {
+                    name: format!("w{index}"),
+                    url: format!("http://127.0.0.1:{}", 8001 + index),
+                })
+                .collect(),
+        };
+        WorkerPool::new(&config, &Metrics::new()).expect("pool should build")
+    }
 
     #[test]
     fn endpoint_joins_without_doubling_slashes() {
@@ -105,5 +160,29 @@ mod tests {
             worker.endpoint("/v1/completions?trace=1"),
             "http://127.0.0.1:8001/v1/completions?trace=1"
         );
+    }
+
+    #[test]
+    fn first_policy_pins_every_request_to_one_worker() {
+        let pool = pool(Policy::First, 3);
+        for _ in 0..10 {
+            assert_eq!(pool.pick().worker.name, "w0");
+        }
+    }
+
+    #[test]
+    fn round_robin_rotates_evenly_and_wraps() {
+        let pool = pool(Policy::RoundRobin, 3);
+        let picked: Vec<String> = (0..7).map(|_| pool.pick().worker.name.clone()).collect();
+
+        assert_eq!(picked, ["w0", "w1", "w2", "w0", "w1", "w2", "w0"]);
+    }
+
+    #[test]
+    fn round_robin_over_one_worker_is_that_worker() {
+        let pool = pool(Policy::RoundRobin, 1);
+        for _ in 0..5 {
+            assert_eq!(pool.pick().worker.name, "w0");
+        }
     }
 }

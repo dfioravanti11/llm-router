@@ -2,20 +2,21 @@
 
 > Living document. Update this file whenever a change touches how components are structured or how they talk to each other — new modules, changed request flow, new external dependency, changed data flow through the block index, etc. Keep it in sync with the actual code, not the aspirational spec: if code diverges from `project_spec.md`, this file should describe what's real, and note the divergence.
 
-**Status as of this writing: R0.1.** The "What exists today" section below
+**Status as of this writing: R0.2.** The "What exists today" section below
 describes real code. Everything after it is the target architecture from
 `project_spec.md`, not yet built. Move sections up as they land.
 
 ## What exists today
 
-A Cargo workspace with two crates.
+A Cargo workspace with three crates.
 
 ### `crates/warmpath` — the router
 
 | Module | Responsibility |
 |---|---|
 | `config` | TOML deserialization with `deny_unknown_fields`, plus validation (non-empty worker list, unique names, URL scheme). |
-| `worker` | `Worker` (name + normalized base URL) and `WorkerPool` (workers + one shared `reqwest::Client`). `WorkerPool::pick` is the policy seam; R0.1 always returns the first worker. |
+| `worker` | `Worker` (name + normalized base URL) and `WorkerPool` (workers, one shared `reqwest::Client`, the policy, and a rotation cursor). `WorkerPool::pick` returns a `Choice` carrying the worker and its pre-resolved metric handles. |
+| `metrics` | Prometheus registry and per-worker metric handles. |
 | `proxy` | The forwarding path, plus the health handler. |
 | `error` | `ProxyError` mapped to OpenAI-shaped error bodies. |
 | `lib` | `AppState`, `RequestIds`, `router()`, `init_tracing()`. |
@@ -28,9 +29,11 @@ Request path as built:
 3. The declared `content-length` is checked against `server.max_request_bytes`
    before anything is buffered; the body is then buffered, because R0.3 needs
    the full prompt.
-4. `WorkerPool::pick` selects a worker. Hop-by-hop headers, headers named in
-   `Connection`, `host`, and `content-length` are dropped; the request id is
-   added.
+4. `WorkerPool::pick` selects a worker: `round-robin` rotates on an atomic
+   cursor, `first` pins to one. Neither reads cache state or load, which is the
+   point — they are the baselines R0.3 has to beat. Hop-by-hop headers, headers
+   named in `Connection`, `host`, and `content-length` are dropped; the request
+   id is added.
 5. The upstream response's status and forwardable headers are copied back, and
    the body is streamed through as raw `Bytes`.
 
@@ -46,23 +49,77 @@ Two properties fall out of the streaming design rather than being bolted on:
   inline by the client's response body, bytes are pulled off the worker socket
   only when the client is ready for them.
 
+### Metrics
+
+`Metrics` owns the registry; `Metrics::for_worker` resolves every handle one
+worker's request path needs, once at startup, into a `WorkerMetrics` that the
+`Choice` hands to the proxy. `prometheus-client` metrics share storage across
+clones, so counters and gauges on the hot path are a plain atomic with no label
+lookup. Histograms still take a short mutex per observation; whether that costs
+anything is a question for R0.9, which measures the router's overhead rather
+than assuming it.
+
+One sharp edge worth remembering: `Family::get_or_create` returns a guard
+holding a read lock on the label map, and takes a write lock when the label set
+is new. Two live guards on the same family deadlock the calling thread, and
+temporaries in a struct literal all live to the end of that statement — which
+is exactly that shape. `for_worker` binds each lookup to its own `let`.
+
+### `crates/warmpath-bench` — the load generator
+
+A separate binary, usable against any OpenAI-compatible endpoint.
+
+| Module | Responsibility |
+|---|---|
+| `schedule` | Seeded xorshift generator and the Poisson arrival schedule. |
+| `workload` | Request bodies, built before the run starts so nothing but the send happens on the dispatch path. |
+| `runner` | The dispatch loop, open and closed. |
+| `record` | `RunConfig` and the per-request record. |
+| `report` | Validity verdict, latency summaries, and on-disk output. |
+| `stats` | HdrHistogram summaries, medians, and Student's t confidence intervals. |
+| `aggregate` | Several runs into one publishable campaign. |
+
+Three properties are why it exists rather than an off-the-shelf generator:
+
+- **Open loop by construction.** The schedule is a `Vec<Duration>` computed
+  before the first request goes out, and the dispatch loop sleeps to absolute
+  deadlines. A deadline already in the past returns immediately, so generator
+  slowness becomes measured lag rather than a quietly stretched schedule.
+- **Both clocks, every request.** Latency is recorded from the intended
+  dispatch time and from the actual one. The first is the honest number; the
+  second is what a generator without a schedule would report. Keeping both
+  means the coordinated-omission gap falls out of any run.
+- **Runs can be invalid.** A run whose p99 dispatch lag exceeds its budget, or
+  whose error rate exceeds one percent, is marked invalid, kept on disk with
+  its reasons, and excluded from the campaign statistics.
+
+Across runs, each run contributes one observation per metric — its own p99, for
+instance — and those get a median and a t-based 95% interval. The interval
+describes the spread of run-level percentiles, which is the question a reader
+is actually asking. Applying a normal approximation to individual latencies
+would be wrong: latency distributions are heavy-tailed and their percentiles
+are not sample means.
+
 ### `crates/warmpath-mock` — the mock worker
 
 Serves `/v1/chat/completions`, `/v1/completions`, `/health`, and
-`/debug/stats`. Output is deterministic (fixed completion id, `created: 0`), so
+`/debug/stats`. Concurrency is bounded by a semaphore whose permit is held for
+the whole response, so requests beyond the limit queue for real. A worker that
+never queues cannot be overloaded, and an overloaded worker is the only place a
+closed-loop generator's blind spot shows up. Output is deterministic (fixed completion id, `created: 0`), so
 two runs of the same request produce byte-identical responses — which is what
 makes the router's byte-identity test an equality assertion rather than a field
 comparison. A `Slot` guard held by the response body reports `active`,
 `started`, `completed`, and `cancelled`, so a dropped response is observable
 from outside the process.
 
-Not built yet: cache simulation, queueing, KV utilization, ZMQ event
-publishing, failure injection.
+Not built yet: cache simulation, KV utilization, ZMQ event publishing, failure
+injection.
 
 ### Not built yet, anywhere
 
-Prompt builder, block index, policy engine, metrics, tracing export,
-`warmpath-bench`, Docker Compose.
+Prompt builder, block index, prefix-affinity policies, OpenTelemetry export,
+Docker Compose.
 
 ## Target system overview
 

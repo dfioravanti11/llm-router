@@ -11,7 +11,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::json;
 use tokio::net::TcpListener;
-use warmpath::config::{Config, ServerConfig, UpstreamConfig, WorkerConfig};
+use warmpath::config::{Config, RoutingConfig, ServerConfig, UpstreamConfig, WorkerConfig};
 use warmpath_mock::{MockConfig, MockState};
 
 /// Start a mock worker on an ephemeral port.
@@ -37,6 +37,7 @@ async fn spawn_router(worker: SocketAddr) -> SocketAddr {
     let config = Config {
         server: ServerConfig::default(),
         upstream: UpstreamConfig::default(),
+        routing: RoutingConfig::default(),
         workers: vec![WorkerConfig {
             name: "w0".to_string(),
             url: format!("http://{worker}"),
@@ -297,6 +298,7 @@ async fn oversized_requests_are_rejected_before_dispatch() {
             ..ServerConfig::default()
         },
         upstream: UpstreamConfig::default(),
+        routing: RoutingConfig::default(),
         workers: vec![WorkerConfig {
             name: "w0".to_string(),
             url: format!("http://{worker}"),

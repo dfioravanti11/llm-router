@@ -1,0 +1,130 @@
+{
+  "title": "Warmpath router",
+  "uid": "warmpath-router",
+  "schemaVersion": 39,
+  "editable": true,
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "5s",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Time to first byte",
+      "description": "Router-side view. The generator's own number is the one to publish; this is for watching a run go by.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "fillOpacity": 0 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, worker) (rate(warmpath_time_to_first_byte_seconds_bucket[1m])))",
+          "legendFormat": "p50 {{worker}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, worker) (rate(warmpath_time_to_first_byte_seconds_bucket[1m])))",
+          "legendFormat": "p99 {{worker}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "End-to-end latency",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "fillOpacity": 0 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, worker) (rate(warmpath_end_to_end_latency_seconds_bucket[1m])))",
+          "legendFormat": "p50 {{worker}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, worker) (rate(warmpath_end_to_end_latency_seconds_bucket[1m])))",
+          "legendFormat": "p99 {{worker}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Routing decisions per second",
+      "description": "How evenly the policy is spreading traffic. Under round-robin these lines should sit on top of each other.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (worker, policy) (rate(warmpath_routing_decisions_total[1m]))",
+          "legendFormat": "{{worker}} ({{policy}})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Request outcomes per second",
+      "description": "Cancelled means the client hung up mid-stream. A rising cancelled line during a benchmark usually means the generator is timing out.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 9 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(warmpath_requests_total[1m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(warmpath_rejected_requests_total[1m])",
+          "legendFormat": "rejected at ingress",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "In-flight requests",
+      "description": "Dispatched but not finished. Should return to zero between runs; if it does not, a response body is being leaked.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 20 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "warmpath_in_flight_requests",
+          "legendFormat": "in flight",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

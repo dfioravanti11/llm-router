@@ -1,9 +1,10 @@
 //! Mock inference worker.
 //!
 //! Speaks enough of the OpenAI API for the router to be developed and tested
-//! without a GPU. R0.1 covers streaming and non-streaming chat completions plus
-//! the counters the router's cancellation tests assert on. Cache simulation,
-//! queueing, and failure injection arrive with later releases.
+//! without a GPU: streaming and non-streaming chat completions, bounded
+//! concurrency with queueing, and counters the router's cancellation tests
+//! assert on. Cache simulation, KV utilization, ZMQ event publishing, and
+//! failure injection arrive with later releases.
 
 pub mod chat;
 
@@ -15,6 +16,7 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Timing and identity knobs for one mock worker.
 #[derive(Debug, Clone)]
@@ -27,6 +29,11 @@ pub struct MockConfig {
     pub inter_token_delay: Duration,
     /// Token count used when the request does not set `max_tokens`.
     pub default_max_tokens: usize,
+    /// Requests served at once. Anything beyond this waits.
+    ///
+    /// A worker that never queues cannot be overloaded, and an overloaded
+    /// worker is the only place a closed-loop generator's blind spot shows up.
+    pub max_concurrency: usize,
 }
 
 impl Default for MockConfig {
@@ -36,6 +43,7 @@ impl Default for MockConfig {
             time_to_first_token: Duration::from_millis(20),
             inter_token_delay: Duration::from_millis(5),
             default_max_tokens: 32,
+            max_concurrency: 256,
         }
     }
 }
@@ -43,8 +51,12 @@ impl Default for MockConfig {
 /// Counters the router's tests read to prove a client disconnect frees the slot.
 #[derive(Debug, Default, Serialize)]
 pub struct Counters {
-    /// Requests currently holding a slot.
+    /// Requests currently holding a slot, whether queued or being served.
     pub active: i64,
+    /// Requests waiting for a serving slot.
+    pub queued: i64,
+    /// Serving slots available right now.
+    pub available_slots: usize,
     /// Requests admitted since start.
     pub started: u64,
     /// Requests whose response was delivered in full.
@@ -56,7 +68,12 @@ pub struct Counters {
 #[derive(Debug)]
 struct Inner {
     config: MockConfig,
+    /// Bounds how many requests are served at once. A request holds a permit
+    /// for the whole response, so the queue in front of it is real rather than
+    /// simulated.
+    slots: Arc<Semaphore>,
     active: AtomicI64,
+    queued: AtomicI64,
     started: AtomicU64,
     completed: AtomicU64,
     cancelled: AtomicU64,
@@ -70,10 +87,13 @@ pub struct MockState {
 
 impl MockState {
     pub fn new(config: MockConfig) -> Self {
+        let slots = Arc::new(Semaphore::new(config.max_concurrency.max(1)));
         Self {
             inner: Arc::new(Inner {
                 config,
+                slots,
                 active: AtomicI64::new(0),
+                queued: AtomicI64::new(0),
                 started: AtomicU64::new(0),
                 completed: AtomicU64::new(0),
                 cancelled: AtomicU64::new(0),
@@ -88,17 +108,34 @@ impl MockState {
     pub fn counters(&self) -> Counters {
         Counters {
             active: self.inner.active.load(Ordering::Relaxed),
+            queued: self.inner.queued.load(Ordering::Relaxed),
+            available_slots: self.inner.slots.available_permits(),
             started: self.inner.started.load(Ordering::Relaxed),
             completed: self.inner.completed.load(Ordering::Relaxed),
             cancelled: self.inner.cancelled.load(Ordering::Relaxed),
         }
     }
 
-    fn admit(&self) -> Slot {
+    /// Take a slot, waiting for a serving permit if the worker is busy.
+    ///
+    /// The wait happens before any timing starts, so a queued request's time to
+    /// first token includes the queueing, exactly as it would on a real worker.
+    async fn admit(&self) -> Slot {
         self.inner.started.fetch_add(1, Ordering::Relaxed);
         self.inner.active.fetch_add(1, Ordering::Relaxed);
+        self.inner.queued.fetch_add(1, Ordering::Relaxed);
+
+        // The semaphore is never closed, so acquiring cannot fail.
+        let permit = Arc::clone(&self.inner.slots)
+            .acquire_owned()
+            .await
+            .expect("the slot semaphore is never closed");
+
+        self.inner.queued.fetch_sub(1, Ordering::Relaxed);
+
         Slot {
             state: self.clone(),
+            _permit: permit,
             released: false,
         }
     }
@@ -112,6 +149,8 @@ impl MockState {
 /// cancellation signal.
 struct Slot {
     state: MockState,
+    /// Released with the slot, which is what lets a queued request start.
+    _permit: OwnedSemaphorePermit,
     released: bool,
 }
 
