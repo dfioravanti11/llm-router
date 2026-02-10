@@ -15,8 +15,12 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::StreamExt;
 
+use std::sync::Arc;
+
 use crate::error::ProxyError;
+use crate::index::Reservation;
 use crate::metrics::WorkerMetrics;
+use crate::worker::WorkerPool;
 use crate::AppState;
 
 /// Header carrying the id assigned at ingress. Sent upstream and returned to
@@ -66,8 +70,15 @@ pub async fn proxy(
         }
     };
 
-    let choice = state.pool.pick();
-    let worker = choice.worker;
+    // Fingerprinting happens before the worker is chosen, because the choice
+    // depends on it. A body the router cannot read simply routes on load.
+    let fingerprint = state
+        .prompt_builder
+        .as_ref()
+        .and_then(|builder| crate::prompt::fingerprint(builder, &body_bytes));
+
+    let choice = state.pool.pick(fingerprint.as_ref());
+    let worker = state.pool.worker(choice.index);
     let url = worker.endpoint(&path_and_query);
 
     let mut upstream_headers = HeaderMap::with_capacity(parts.headers.len() + 1);
@@ -82,6 +93,11 @@ pub async fn proxy(
         method = %parts.method,
         path = %path_and_query,
         request_bytes = body_bytes.len(),
+        reason = choice.decision.reason.as_str(),
+        prompt_blocks = fingerprint.as_ref().map(|f| f.block_count()).unwrap_or(0),
+        matched_blocks = choice.decision.matched_blocks,
+        match_ratio = choice.decision.match_ratio,
+        queue_depth = state.pool.in_flight(choice.index),
         "dispatching request"
     );
 
@@ -99,6 +115,7 @@ pub async fn proxy(
         Ok(response) => response,
         Err(source) => {
             choice.metrics.record_failure();
+            state.pool.finish(choice.index);
             return Err(ProxyError::Upstream {
                 worker: worker.name.clone(),
                 source,
@@ -119,6 +136,9 @@ pub async fn proxy(
     let guard = StreamGuard {
         request_id: request_id.clone(),
         worker: worker.name.clone(),
+        worker_index: choice.index,
+        pool: Arc::clone(&state.pool),
+        reservation: choice.reservation,
         metrics: choice.metrics.clone(),
         dispatched_at,
         finished: false,
@@ -163,6 +183,14 @@ pub async fn health() -> &'static str {
     "ok"
 }
 
+/// What the block index currently believes.
+///
+/// Not a Prometheus surface: it is a debugging window, and the numbers in it
+/// are a model of the workers' caches rather than a reading of them.
+pub async fn index_stats(State(state): State<AppState>) -> Response {
+    axum::Json(state.pool.index_stats()).into_response()
+}
+
 pub async fn metrics(State(state): State<AppState>) -> Response {
     match state.metrics.encode() {
         Ok(body) => (
@@ -191,6 +219,11 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
 struct StreamGuard {
     request_id: String,
     worker: String,
+    worker_index: usize,
+    pool: Arc<WorkerPool>,
+    /// Blocks this request will produce, attributed to its worker until it
+    /// settles. Confirmed on completion, released on anything else.
+    reservation: Option<Reservation>,
     metrics: WorkerMetrics,
     dispatched_at: Instant,
     finished: bool,
@@ -210,6 +243,12 @@ impl StreamGuard {
 
     fn record_completion(&mut self) {
         self.finished = true;
+        // The blocks are really on that worker now, so the index can stop
+        // guessing and start knowing.
+        if let Some(reservation) = self.reservation.as_mut() {
+            reservation.confirm();
+        }
+        self.pool.finish(self.worker_index);
         self.metrics
             .record_completion(self.dispatched_at.elapsed().as_secs_f64());
         tracing::info!(
@@ -222,6 +261,9 @@ impl StreamGuard {
 
     fn record_failure(&mut self, error: &reqwest::Error) {
         self.finished = true;
+        // The reservation is left unconfirmed, so dropping it takes the blocks
+        // back out of the index.
+        self.pool.finish(self.worker_index);
         self.metrics.record_failure();
         tracing::warn!(
             request_id = %self.request_id,
@@ -235,6 +277,7 @@ impl StreamGuard {
 impl Drop for StreamGuard {
     fn drop(&mut self) {
         if !self.finished {
+            self.pool.finish(self.worker_index);
             self.metrics.record_cancellation();
             tracing::info!(
                 request_id = %self.request_id,

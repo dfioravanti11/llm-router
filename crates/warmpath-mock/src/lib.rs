@@ -6,6 +6,7 @@
 //! assert on. Cache simulation, KV utilization, ZMQ event publishing, and
 //! failure injection arrive with later releases.
 
+pub mod cache;
 pub mod chat;
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -16,7 +17,10 @@ use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use warmpath_core::PromptBuilder;
+
+use crate::cache::{CacheStats, PrefixCache};
 
 /// Timing and identity knobs for one mock worker.
 #[derive(Debug, Clone)]
@@ -34,6 +38,18 @@ pub struct MockConfig {
     /// A worker that never queues cannot be overloaded, and an overloaded
     /// worker is the only place a closed-loop generator's blind spot shows up.
     pub max_concurrency: usize,
+    /// Blocks the simulated prefix cache holds. Zero disables it, which makes
+    /// every request pay full prefill and is the control condition for any
+    /// cache-aware routing measurement.
+    pub cache_blocks: usize,
+    /// Token ids per block. Must match the router's, or the two are describing
+    /// different things.
+    pub block_size: usize,
+    /// Prefill cost of one token whose block was not cached.
+    ///
+    /// This is the entire reason cache-aware routing shows up in a latency
+    /// measurement: a cached prefix skips it.
+    pub prefill_per_token: Duration,
 }
 
 impl Default for MockConfig {
@@ -44,6 +60,9 @@ impl Default for MockConfig {
             inter_token_delay: Duration::from_millis(5),
             default_max_tokens: 32,
             max_concurrency: 256,
+            cache_blocks: 0,
+            block_size: warmpath_core::DEFAULT_BLOCK_SIZE,
+            prefill_per_token: Duration::from_micros(50),
         }
     }
 }
@@ -63,6 +82,8 @@ pub struct Counters {
     pub completed: u64,
     /// Requests whose client went away before the response finished.
     pub cancelled: u64,
+    /// The simulated prefix cache, in the shape vLLM reports.
+    pub cache: CacheStats,
 }
 
 #[derive(Debug)]
@@ -72,6 +93,8 @@ struct Inner {
     /// for the whole response, so the queue in front of it is real rather than
     /// simulated.
     slots: Arc<Semaphore>,
+    cache: Mutex<PrefixCache>,
+    prompts: PromptBuilder,
     active: AtomicI64,
     queued: AtomicI64,
     started: AtomicU64,
@@ -88,9 +111,13 @@ pub struct MockState {
 impl MockState {
     pub fn new(config: MockConfig) -> Self {
         let slots = Arc::new(Semaphore::new(config.max_concurrency.max(1)));
+        let cache = Mutex::new(PrefixCache::new(config.cache_blocks));
+        let prompts = PromptBuilder::simple(config.block_size);
         Self {
             inner: Arc::new(Inner {
                 config,
+                cache,
+                prompts,
                 slots,
                 active: AtomicI64::new(0),
                 queued: AtomicI64::new(0),
@@ -105,6 +132,32 @@ impl MockState {
         &self.inner.config
     }
 
+    /// Charge a request against the prefix cache, returning how many of its
+    /// prompt tokens still have to be prefilled.
+    ///
+    /// The cache is consulted after the serving slot is taken, so a queued
+    /// request's wait is not mistaken for prefill.
+    pub async fn admit_prompt(&self, body: &serde_json::Value) -> Prefill {
+        let Some(fingerprint) = crate::chat::fingerprint(&self.inner.prompts, body) else {
+            return Prefill::default();
+        };
+
+        let cached_blocks = self.inner.cache.lock().await.admit(&fingerprint.blocks);
+        let block_size = self.inner.config.block_size;
+
+        Prefill {
+            prompt_tokens: fingerprint.token_count,
+            cached_tokens: cached_blocks * block_size,
+            uncached_tokens: fingerprint
+                .token_count
+                .saturating_sub(cached_blocks * block_size),
+        }
+    }
+
+    pub async fn cache_stats(&self) -> CacheStats {
+        self.inner.cache.lock().await.stats()
+    }
+
     pub fn counters(&self) -> Counters {
         Counters {
             active: self.inner.active.load(Ordering::Relaxed),
@@ -113,6 +166,7 @@ impl MockState {
             started: self.inner.started.load(Ordering::Relaxed),
             completed: self.inner.completed.load(Ordering::Relaxed),
             cancelled: self.inner.cancelled.load(Ordering::Relaxed),
+            cache: CacheStats::default(),
         }
     }
 
@@ -190,5 +244,16 @@ async fn health() -> &'static str {
 }
 
 async fn stats(State(state): State<MockState>) -> Json<Counters> {
-    Json(state.counters())
+    let mut counters = state.counters();
+    counters.cache = state.cache_stats().await;
+    Json(counters)
+}
+
+/// What a request costs, once the prefix cache has had its say.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Prefill {
+    pub prompt_tokens: usize,
+    /// Tokens whose blocks were already cached, so prefill skips them.
+    pub cached_tokens: usize,
+    pub uncached_tokens: usize,
 }

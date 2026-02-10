@@ -5,7 +5,7 @@
 //! `prometheus-client` metrics share their storage across clones, so the hot
 //! path touches an atomic (counters, gauges) without going through the label
 //! map. Histograms still take a short mutex per observation; whether that
-//! matters is a question for R0.9, which measures the router's own overhead
+//! matters is a question for R0.5, which measures the router's own overhead
 //! rather than assuming it.
 
 use prometheus_client::encoding::text::encode;

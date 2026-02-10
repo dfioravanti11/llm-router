@@ -9,39 +9,44 @@ Working name. Expect it to change before a public release.
 
 ## Status
 
-R0.2. The measurement harness ships before the routing policy it exists to
-judge, because a baseline captured by a different harness is not a baseline.
+R0.3. Prefix-affinity routing works and beats round-robin on the median, on a
+workload with prefix reuse. `RESULTS.md` has the numbers, including the part
+that is not yet established and the regime where the whole idea buys nothing.
 
 What works today:
 
 - OpenAI-compatible `/v1/chat/completions` and `/v1/completions`, streaming and
   non-streaming, with SSE output byte-identical to what the worker wrote.
 - A client disconnect cancels the upstream request and frees the worker slot.
-- Round-robin and single-worker routing, switchable in config. Neither looks at
-  cache state; they are the baselines R0.3 has to beat.
+- Prompt building: the full conversation rendered through a chat template,
+  tokenized, and cut into a chained block hash per 16 tokens.
+- An approximate block index inferred from the router's own dispatches, with
+  leaf-first least-recently-used eviction and in-flight block reservation.
+- Four policies, switchable in config: `round-robin` and `first` as baselines,
+  `prefix-affinity` and `prefix-affinity-balanced`.
 - Prometheus metrics and a Grafana dashboard.
 - `warmpath-bench`: an open-loop load generator with intended-time latency
   accounting, warmup exclusion, run manifests carrying config and seed and git
   SHA, generator-saturation detection, and confidence intervals across runs.
-- A mock worker with bounded concurrency and queueing, so all of the above runs
-  without a GPU.
+- A mock worker with bounded concurrency, queueing, and a simulated block-level
+  prefix cache, so all of the above runs without a GPU.
 
-Not built yet: the prompt builder, the block index, and prefix-affinity
-routing. Those are R0.3.
-
-`RESULTS.md` has the one measured finding so far, on why closed-loop load
-generators under-report tail latency.
+Not built yet: worker load and KV-pressure polling, session affinity, and
+health checking (R0.4), then real vLLM, the router's own overhead, and the
+ship-ready repo (R0.5).
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `crates/warmpath` | The router: config, worker pool, proxy path, metrics |
+| `crates/warmpath` | The router: config, index, policy, worker pool, proxy path |
+| `crates/warmpath-core` | Prompt rendering, tokenization, block hashing |
 | `crates/warmpath-bench` | The load generator and statistics harness |
 | `crates/warmpath-mock` | Mock inference worker for GPU-free development |
 | `config/warmpath.toml` | Router configuration |
 | `deploy/` | Prometheus scrape config and the Grafana dashboard |
 | `scripts/co-demo.sh` | The coordinated-omission comparison |
+| `scripts/policy-compare.sh` | Routing policies measured against each other |
 
 ## Running it
 
@@ -75,9 +80,10 @@ interval:
 make bench
 ```
 
-The coordinated-omission comparison, which starts and stops everything itself:
+Two comparisons that start and stop everything themselves:
 
 ```
+make policy-compare
 make co-demo
 ```
 

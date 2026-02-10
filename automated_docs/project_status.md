@@ -2,29 +2,45 @@
 
 > Update this file whenever a milestone's exit criteria are met, scope changes, or the "what's next" changes. Milestones and exit criteria are defined in `project_spec.md` §3 (Release Roadmap) — this file tracks progress against them, it doesn't redefine them.
 
-## Current phase: R0.2 complete, starting R0.3
+## Current phase: R0.3 complete, starting R0.4
 
-The router is a correct streaming proxy with baseline routing policies and
-Prometheus metrics, and the measurement harness is in place. No prompt builder
-and no block index yet.
+Prefix-affinity routing works and is measured. The router builds a prompt
+fingerprint, keeps an approximate block index with in-flight reservation, and
+chooses a worker with one of four policies. The load signal is still the
+router's own in-flight count rather than anything the worker reports.
 
 ## Milestones
 
-Each release is a theme + exit criterion + demo artifact, not a date. GPU is required only at R0.5 and R1.0 (bounded validation sessions).
+Spec v3.0 cut the roadmap from ten releases to five. **R0.1 through R0.5 are
+the commitment; everything else is Appendix A and closed until R0.5 ships.**
+GPU is required only at R0.5.
 
 | Release | Theme | Exit criterion | Status |
 |---|---|---|---|
 | R0.1 | Skeleton — correct proxy, does nothing clever | Client disconnect provably frees the worker slot; SSE bytes match upstream exactly | Done |
 | R0.2 | Honest measurement — the harness, before any policy | Baseline p99 TTFT with CI from ≥3 runs, reproducible by one command; open-vs-closed-loop coordinated-omission demo | Done |
-| R0.3 | The core idea — prefix-affinity routing | First affinity-vs-round-robin comparison chart with CIs on mock workers; hash-chain correctness test passing | In progress |
+| R0.3 | The core idea — prefix-affinity routing | First affinity-vs-round-robin comparison with CIs on mocks; hash-correctness test passing | Partly done — see below |
 | R0.4 | Load-aware and session-aware | A workload where pure affinity loses and balanced affinity wins, documented | Not started |
-| R0.5 | First contact with reality (real vLLM) | Real-hardware chart matching/diverging from mock result; predicted-vs-actual hit-rate discrepancy quantified | Not started |
-| R0.6 | Reliability | Chaos test: zero dropped/corrupted responses across repeated worker kills; hedging improves p99.9 measurably | Not started |
-| R0.7 | Precise indexing (ZMQ events) | Quantified answer to how much accuracy the approximate index gives up, and when it matters | Not started |
-| R0.8 | Agentic workloads | LRU vs. reuse-aware retention comparison on real CacheWise traces, crossover documented | Not started |
-| R0.9 | Self-scrutiny | Router's own added overhead measured and published; ≥2 documented failure regimes | Not started |
-| R1.0 | Public release | A stranger can `docker compose up`, run `make bench`, and regenerate every published number | Not started |
-| R1.0+ | Blog post | Published post covering coordinated omission, approximate-vs-precise, negative results, router overhead | Not started |
+| R0.5 | Reality, and ship | A stranger can `docker compose up`, run `make bench`, and regenerate every published number | Not started |
+
+Appendix A, closed until R0.5 ships: A1 reliability engineering, A2 precise
+indexing via vLLM KV events, A3 agentic workloads, A4 a blog post, A5
+disaggregation or sharded routers.
+
+### R0.3 is not fully closed
+
+The comparison, the index, the reservation, and the policies are done and
+tested. What is missing is the part the spec calls the highest-risk item in the
+project: the router currently tokenizes with a deterministic whitespace
+tokenizer and renders with a chat template of its own design, so nothing has
+been checked against a real model's tokenization or against vLLM's block hash
+construction. A mismatch there fails silently, producing mediocre hit rates that
+read as a weak result rather than a bug.
+
+Part of that needs a GPU and belongs to R0.5. Part of it does not: the real
+Qwen3-1.7B tokenizer and chat template can be exercised on a laptop, and vLLM's
+hash construction can be implemented from its source. Closing the CPU-side part
+is the next work item, ahead of R0.4.
 
 ## What's been accomplished
 
@@ -40,48 +56,54 @@ Each release is a theme + exit criterion + demo artifact, not a date. GPU is req
     byte-identical to the worker's own output, and a client that hangs up
     mid-stream frees the worker slot.
 - **R0.2 shipped.** The measurement harness, before the policy it will judge.
-  - `warmpath-bench`: open-loop Poisson schedule computed before the run
-    starts, intended-time latency accounting, warmup exclusion, HdrHistogram
-    summaries, per-request JSONL, run reports carrying config and seed and git
-    SHA, and median plus 95% confidence intervals across runs.
-  - Every request timed against both the intended and the actual dispatch time,
-    so the coordinated-omission gap comes out of any run.
-  - A run whose generator fell behind its own schedule is marked invalid and
-    excluded from its campaign, with the reason recorded.
-  - Router: Prometheus metrics at `/metrics`, plus `round-robin` and `first`
-    policies under a `[routing]` config section.
-  - Mock worker: bounded concurrency with real queueing.
-  - First measured finding in `RESULTS.md`, reproducible with `make co-demo`.
+  Open-loop Poisson schedule, intended-time latency, warmup exclusion, run
+  reports carrying config and seed and git SHA, invalid-run detection, and
+  medians with 95% intervals across runs. Router gained Prometheus metrics and
+  a round-robin baseline; the mock gained bounded concurrency with queueing.
+- **R0.3 shipped.** Prefix-affinity routing, measured against the baseline.
+  - `warmpath-core`: full-conversation chat template rendering, tokenization,
+    and a chained block hash. The router and the mock worker both use it, and
+    each fingerprints the request body independently.
+  - Approximate block index: a flat map from block hash to worker bitset, which
+    answers prefix queries exactly as a radix tree would because the hash chain
+    already encodes the prefix. Leaf-first LRU eviction, and in-flight block
+    reservation so a burst of identical prefixes is not scattered.
+  - `prefix-affinity` and `prefix-affinity-balanced` policies, written as a
+    pure function of index answer, load, and a rotation cursor.
+  - The mock worker simulates a block-level prefix cache with prefill cost and
+    exports vLLM-shaped hit counters.
+  - Result in `RESULTS.md`: on an oversubscribed working set, the workers'
+    reported hit rate goes from 35.6% to 89.1% and p50 TTFT from 38.3ms to
+    8.5ms at equal throughput. The p99 intervals overlap at three runs, so the
+    tail claim is explicitly not made.
+  - First documented crossover: when the working set fits everywhere, affinity
+    buys nothing.
 
 ## What's next
 
-**R0.3 — Prefix-affinity routing.** The core idea, now that there is a harness
-able to judge it.
+**R0.4 — Load-aware and session-aware.** Affinity currently weighs itself
+against the router's own in-flight count, which is a proxy for a queue rather
+than a reading of one.
 
-1. Prompt builder: render the full conversation through the model's chat
-   template, tokenize with the HF `tokenizers` crate, compute a
-   vLLM-compatible block hash chain at 16-token granularity. Building from only
-   the latest message is a known bug class in this space and the reason the
-   full render is non-negotiable.
-2. Approximate block index: radix tree over block-hash sequences with
-   per-node worker sets, LRU eviction against a per-worker block budget, behind
-   the trait the event-driven backend will also implement at R0.7.
-3. In-flight block reservation, so two requests with the same long prefix
-   arriving milliseconds apart do not both score as misses.
-4. `prefix-affinity` and `prefix-affinity-balanced` policies with cache and
-   balance thresholds.
-5. Workload shapes with real prefix sharing in `warmpath-bench`, which R0.2
-   deliberately left out.
-6. A hash-chain correctness test, and the first affinity-versus-round-robin
-   comparison with confidence intervals.
-
-Per the spec's build philosophy: the block index and the routing policy get
-written and understood line by line.
+1. Poll each worker's `/metrics` for running and waiting counts, KV cache
+   utilization, and its own `prefix_cache_queries` / `prefix_cache_hits`. That
+   last pair is what turns the predicted-versus-actual hit rate check into
+   something the router does not control.
+2. Feed KV headroom into the balanced score, replacing the relative-load
+   stand-in.
+3. Session affinity as a separate composable mechanism, so a multi-turn
+   conversation sticks to its worker unless that worker fails or saturates.
+4. `power-of-two` and `least-loaded` baselines, for a fair policy field.
+5. A skewed workload that hotspots naive affinity. R0.3's comparison found the
+   two affinity policies indistinguishable because nothing created a hotspot;
+   building the workload where that stops being true is the milestone.
+6. More repetitions. R0.3's p99 intervals overlapped at three runs, and R0.4
+   asks a finer question than R0.3 did.
 
 ## Open risks to watch
 
 From `project_spec.md` §2.2 — surface these if they start to materialize:
-- Mock cache model might not be realistic enough to survive real vLLM (checked at R0.5/R1.0 gates).
-- Tokenization/hashing mismatch with vLLM could silently break matching (guarded by an integration test before any routing result is trusted).
-- Rust learning curve could stall early releases (mitigated by keeping R0.1 deliberately boring).
+- Mock cache model might not be realistic enough to survive real vLLM (checked at the R0.5 gate; divergence is itself a publishable finding).
+- **Tokenization/hashing mismatch with vLLM, the highest-risk item.** It fails silently. Currently open: see the R0.3 note above.
+- Scope creep back into Appendix A. It is closed until R0.5 ships.
 - GPU cost overrun (mitigated by bounding validation sessions to spot instances).

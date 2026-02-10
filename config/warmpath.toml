@@ -1,8 +1,7 @@
 # Warmpath router configuration.
 #
-# Matches the R0.2 surface. Block index backend, cache and balance thresholds,
-# hedging, and health checking get their own sections as the releases that read
-# them land.
+# Matches the R0.3 surface. Index backend selection, hedging, and health
+# checking get their own sections as the releases that read them land.
 
 [server]
 bind = "0.0.0.0:8080"
@@ -19,7 +18,31 @@ read_timeout_ms = 60000
 [routing]
 # `round-robin` rotates evenly and ignores cache state; it is the baseline every
 # later policy is measured against. `first` pins all traffic to one worker.
+# `prefix-affinity` sends a request to whichever worker already holds the most
+# of its prompt. `prefix-affinity-balanced` weighs that against load, and yields
+# entirely when the fleet is far enough out of balance.
 policy = "round-robin"
+
+[routing.affinity]
+# Smallest share of a prompt's blocks worth routing on. A trivial overlap should
+# not drag a request onto a particular worker.
+cache_threshold = 0.2
+# The busiest worker must exceed this many in-flight requests before the fleet
+# can be called imbalanced. Without it, one against zero looks like a crisis.
+balance_abs_threshold = 8
+# And it must be this many times deeper than the quietest worker.
+balance_rel_threshold = 2.0
+# Share of the balanced score that comes from headroom rather than cache
+# locality. Zero picks the longest match; one ignores the cache entirely.
+load_weight = 0.3
+
+[index]
+# Token ids per block. Must match the worker's, or the two are describing
+# different things.
+block_size = 16
+# Blocks one worker is assumed to hold before the index models an eviction.
+# This is a guess about the engine's capacity, not a reading of it.
+block_budget = 65536
 
 [[workers]]
 name = "w0"

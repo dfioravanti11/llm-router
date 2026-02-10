@@ -33,6 +33,19 @@ struct Args {
     /// Requests served at once. Anything beyond this queues.
     #[arg(long, default_value_t = 256)]
     max_concurrency: usize,
+
+    /// Blocks the simulated prefix cache holds. Zero disables it, which is the
+    /// control condition for any cache-aware routing measurement.
+    #[arg(long, default_value_t = 0)]
+    cache_blocks: usize,
+
+    /// Token ids per block. Must match the router's.
+    #[arg(long, default_value_t = 16)]
+    block_size: usize,
+
+    /// Prefill cost per uncached prompt token, in microseconds.
+    #[arg(long, default_value_t = 50)]
+    prefill_per_token_us: u64,
 }
 
 #[tokio::main]
@@ -46,6 +59,9 @@ async fn main() -> anyhow::Result<()> {
         inter_token_delay: Duration::from_millis(args.inter_token_ms),
         default_max_tokens: args.default_max_tokens,
         max_concurrency: args.max_concurrency,
+        cache_blocks: args.cache_blocks,
+        block_size: args.block_size,
+        prefill_per_token: Duration::from_micros(args.prefill_per_token_us),
     });
 
     let listener = TcpListener::bind(args.bind)

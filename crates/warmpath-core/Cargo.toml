@@ -1,0 +1,18 @@
+[package]
+name = "warmpath-core"
+description = "Prompt rendering, tokenization, and vLLM-style block hashing shared by the router and the mock worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+minijinja = "2.23.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+xxhash-rust = { version = "0.8.18", features = ["xxh64"] }

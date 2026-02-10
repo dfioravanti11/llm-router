@@ -14,7 +14,34 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::{MockState, Slot};
+use warmpath_core::{Message, PromptBuilder, PromptFingerprint};
+
+use crate::{MockState, Prefill, Slot};
+
+/// Read the prompt out of a request body.
+///
+/// The worker fingerprints the body itself rather than trusting anything the
+/// router put in a header. That independence is the point: if the router's
+/// hashing drifts, the hit rate drops and the drift is visible, instead of two
+/// copies of the same mistake agreeing with each other.
+pub fn fingerprint(builder: &PromptBuilder, body: &Value) -> Option<PromptFingerprint> {
+    if let Some(messages) = body.get("messages") {
+        let messages: Vec<Message> = serde_json::from_value(messages.clone()).ok()?;
+        if messages.is_empty() {
+            return None;
+        }
+        return builder.fingerprint_chat(&messages).ok();
+    }
+
+    match body.get("prompt") {
+        Some(Value::String(text)) => Some(builder.fingerprint_text(text)),
+        Some(Value::Array(items)) => items
+            .first()
+            .and_then(Value::as_str)
+            .map(|text| builder.fingerprint_text(text)),
+        _ => None,
+    }
+}
 
 /// Fixed id so responses are reproducible across runs.
 const COMPLETION_ID: &str = "cmpl-warmpath-mock";
@@ -86,13 +113,17 @@ async fn complete(
     Json(raw): Json<Value>,
     flavor: Flavor,
 ) -> Result<Response, ErrorResponse> {
-    let request: CompletionRequest = serde_json::from_value(raw)
+    let request: CompletionRequest = serde_json::from_value(raw.clone())
         .map_err(|err| ErrorResponse::bad_request(format!("invalid request: {err}")))?;
 
     let config = state.config();
     let model = request.model.unwrap_or_else(|| config.model.clone());
     let token_count = request.max_tokens.unwrap_or(config.default_max_tokens);
+
+    // The slot comes first, so queueing is not counted as prefill, and the
+    // cache is consulted only once this request is actually being served.
     let slot = state.admit().await;
+    let prefill = state.admit_prompt(&raw).await;
 
     if request.stream {
         Ok(stream_response(
@@ -101,9 +132,10 @@ async fn complete(
             flavor,
             model,
             token_count,
+            prefill,
         ))
     } else {
-        Ok(buffered_response(state.clone(), slot, flavor, model, token_count).await)
+        Ok(buffered_response(state.clone(), slot, flavor, model, token_count, prefill).await)
     }
 }
 
@@ -113,8 +145,9 @@ fn stream_response(
     flavor: Flavor,
     model: String,
     token_count: usize,
+    prefill: Prefill,
 ) -> Response {
-    let ttft = state.config().time_to_first_token;
+    let ttft = time_to_first_token(&state, prefill);
     let inter_token = state.config().inter_token_delay;
 
     let body = async_stream::stream! {
@@ -156,9 +189,10 @@ async fn buffered_response(
     flavor: Flavor,
     model: String,
     token_count: usize,
+    prefill: Prefill,
 ) -> Response {
-    let config = state.config();
-    let elapsed = config.time_to_first_token + config.inter_token_delay * token_count as u32;
+    let elapsed = time_to_first_token(&state, prefill)
+        + state.config().inter_token_delay * token_count as u32;
     tokio::time::sleep(elapsed).await;
 
     let text: String = (0..token_count).map(token_at).collect();
@@ -189,6 +223,17 @@ async fn buffered_response(
 
     slot.complete();
     Json(payload).into_response()
+}
+
+/// Time to first token: a fixed floor plus prefill for whatever the cache did
+/// not already hold.
+///
+/// This is the whole mechanism cache-aware routing exploits, expressed as one
+/// line. A request routed to a worker holding its prefix pays the floor. The
+/// same request routed anywhere else pays for every token again.
+fn time_to_first_token(state: &MockState, prefill: Prefill) -> std::time::Duration {
+    state.config().time_to_first_token
+        + state.config().prefill_per_token * prefill.uncached_tokens as u32
 }
 
 /// What a single streamed chunk carries.

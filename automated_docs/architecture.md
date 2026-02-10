@@ -2,20 +2,23 @@
 
 > Living document. Update this file whenever a change touches how components are structured or how they talk to each other — new modules, changed request flow, new external dependency, changed data flow through the block index, etc. Keep it in sync with the actual code, not the aspirational spec: if code diverges from `project_spec.md`, this file should describe what's real, and note the divergence.
 
-**Status as of this writing: R0.2.** The "What exists today" section below
+**Status as of this writing: R0.3.** The "What exists today" section below
 describes real code. Everything after it is the target architecture from
 `project_spec.md`, not yet built. Move sections up as they land.
 
 ## What exists today
 
-A Cargo workspace with three crates.
+A Cargo workspace with four crates.
 
 ### `crates/warmpath` — the router
 
 | Module | Responsibility |
 |---|---|
 | `config` | TOML deserialization with `deny_unknown_fields`, plus validation (non-empty worker list, unique names, URL scheme). |
-| `worker` | `Worker` (name + normalized base URL) and `WorkerPool` (workers, one shared `reqwest::Client`, the policy, and a rotation cursor). `WorkerPool::pick` returns a `Choice` carrying the worker and its pre-resolved metric handles. |
+| `worker` | `Worker` (name + normalized base URL) and `WorkerPool` (workers, in-flight counts, the block index, one shared `reqwest::Client`, the policy, and a rotation cursor). `WorkerPool::pick` returns a `Choice` carrying the decision, the metric handles, and the block reservation. |
+| `index` | The `BlockIndex` trait and its approximate backend. |
+| `policy` | `choose`, a pure function of index answer, load, and cursor. |
+| `prompt` | Reading the prompt out of an OpenAI request body. |
 | `metrics` | Prometheus registry and per-worker metric handles. |
 | `proxy` | The forwarding path, plus the health handler. |
 | `error` | `ProxyError` mapped to OpenAI-shaped error bodies. |
@@ -29,13 +32,19 @@ Request path as built:
 3. The declared `content-length` is checked against `server.max_request_bytes`
    before anything is buffered; the body is then buffered, because R0.3 needs
    the full prompt.
-4. `WorkerPool::pick` selects a worker: `round-robin` rotates on an atomic
-   cursor, `first` pins to one. Neither reads cache state or load, which is the
-   point — they are the baselines R0.3 has to beat. Hop-by-hop headers, headers
-   named in `Connection`, `host`, and `content-length` are dropped; the request
-   id is added.
-5. The upstream response's status and forwardable headers are copied back, and
-   the body is streamed through as raw `Bytes`.
+4. When the configured policy reads the index, the body is fingerprinted:
+   the whole conversation rendered through the chat template, tokenized, and cut
+   into a chained block hash per 16 tokens. A body the router cannot parse
+   yields no fingerprint and routes on load, because no correctness invariant
+   may depend on the index having an answer.
+5. `WorkerPool::pick` asks the index how many leading blocks each worker holds,
+   reads the in-flight counts, and calls `policy::choose`. The chosen worker
+   gets a `Reservation` over the request's whole block chain.
+6. Hop-by-hop headers, headers named in `Connection`, `host`, and
+   `content-length` are dropped; the request id is added.
+7. The upstream response's status and forwardable headers are copied back, and
+   the body is streamed through as raw `Bytes`. On completion the reservation is
+   confirmed; on anything else it is dropped, which releases it.
 
 Two properties fall out of the streaming design rather than being bolted on:
 
@@ -56,7 +65,7 @@ worker's request path needs, once at startup, into a `WorkerMetrics` that the
 `Choice` hands to the proxy. `prometheus-client` metrics share storage across
 clones, so counters and gauges on the hot path are a plain atomic with no label
 lookup. Histograms still take a short mutex per observation; whether that costs
-anything is a question for R0.9, which measures the router's overhead rather
+anything is a question for R0.5, which measures the router's overhead rather
 than assuming it.
 
 One sharp edge worth remembering: `Family::get_or_create` returns a guard
@@ -64,6 +73,50 @@ holding a read lock on the label map, and takes a write lock when the label set
 is new. Two live guards on the same family deadlock the calling thread, and
 temporaries in a struct literal all live to the end of that statement — which
 is exactly that shape. `for_worker` binds each lookup to its own `let`.
+
+### The block index
+
+A flat map from block hash to a worker bitset, plus per-worker leaf-first LRU
+bookkeeping and a reservation table.
+
+**Why not a radix tree.** The design notes call for a radix tree over
+block-hash sequences. It is not needed: the hash chain already does the tree's
+job, because block hash *i* is computed from its parent and therefore encodes
+every token before it. Two prompts share hash *i* only if they agree on the
+whole prefix, so a flat map answers prefix queries exactly as a tree would, in
+one lookup per block. The tree buys knowing which blocks descend from which,
+which reuse-aware eviction would want (Appendix A3); it can grow then,
+measured against LRU rather than assumed better.
+
+**Why leaf-first eviction.** Plain LRU over blocks evicts a chain's *oldest*
+block, which is its *first* block, which strands every block behind it. The
+worker keeps storing them and the index can never match them again, so the
+modelled hit rate collapses while the modelled memory stays full. Engines evict
+leaves first for the same reason. Under pressure a chain is eaten from the tail
+and prefix matching degrades one block at a time.
+
+**In-flight reservation.** Two requests with the same long prefix can arrive a
+millisecond apart, before either has finished and taught the index anything.
+Without reservation both score as misses and get spread across the fleet, which
+is exactly the scattering the router exists to prevent. `Reservation` releases
+on drop, mirroring the response body's `StreamGuard` deliberately: the same
+shape means the same failure mode cannot appear in one and not the other.
+
+Matching costs O(prompt blocks + workers), not their product. A worker's answer
+is written once, at the block where it stopped matching, since the alive set
+only shrinks.
+
+### `crates/warmpath-core` — prompt handling
+
+Chat template rendering (a documented simple form, and Jinja for the templates
+models ship), tokenization behind a trait, and the chained block hash. The
+router and the mock worker both depend on it and each fingerprints the request
+body independently, so a hashing bug shows up as a collapsed hit rate rather
+than as two copies of the same mistake agreeing.
+
+The hashes are internally consistent, not byte-compatible with vLLM's. Routing
+only needs requests comparable with each other. Compatibility matters for
+checking predicted hit rate against vLLM's own counters, which is R0.5.
 
 ### `crates/warmpath-bench` — the load generator
 
@@ -113,13 +166,18 @@ comparison. A `Slot` guard held by the response body reports `active`,
 `started`, `completed`, and `cancelled`, so a dropped response is observable
 from outside the process.
 
-Not built yet: cache simulation, KV utilization, ZMQ event publishing, failure
-injection.
+It also simulates a block-level prefix cache: a request whose prefix is already
+held skips prefill for those blocks, so time to first token drops. That is what
+makes cache-aware routing observable without a GPU. The cache is a separate
+implementation from the router's index on purpose, since a prediction and the
+thing it predicts being the same function proves nothing.
+
+Not built yet: KV utilization, ZMQ event publishing, failure injection.
 
 ### Not built yet, anywhere
 
-Prompt builder, block index, prefix-affinity policies, OpenTelemetry export,
-Docker Compose.
+Worker state polling, session affinity, the event-driven index, OpenTelemetry
+export, Docker Compose.
 
 ## Target system overview
 

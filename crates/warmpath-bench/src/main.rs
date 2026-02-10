@@ -62,8 +62,23 @@ struct RunArgs {
     #[arg(long, default_value_t = 3)]
     runs: usize,
 
+    /// Words in the varying part of each prompt.
     #[arg(long, default_value_t = 128)]
     prompt_words: usize,
+
+    /// Words in the shared prefix each request carries. Zero makes every
+    /// prompt independent, which is the control condition for cache-aware
+    /// routing.
+    #[arg(long, default_value_t = 0)]
+    shared_prefix_words: usize,
+
+    /// Distinct shared prefixes in circulation.
+    #[arg(long, default_value_t = 0)]
+    prefix_pool: usize,
+
+    /// Label recorded with the run, naming the configuration under test.
+    #[arg(long, default_value = "")]
+    label: String,
 
     #[arg(long, default_value_t = 64)]
     max_tokens: usize,
@@ -123,7 +138,10 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
             duration_secs: args.duration,
             warmup_secs: args.warmup,
             seed: args.seed + repetition as u64,
+            label: args.label.clone(),
             prompt_words: args.prompt_words,
+            shared_prefix_words: args.shared_prefix_words,
+            prefix_pool: args.prefix_pool,
             max_tokens: args.max_tokens,
             stream: !args.no_stream,
             max_dispatch_lag_ms: args.max_dispatch_lag_ms,

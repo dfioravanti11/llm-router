@@ -4,6 +4,45 @@ Notable changes to this project, newest first. Update this alongside any commit 
 
 Format per entry: `## YYYY-MM-DD — short title`, then a few bullets of what changed and why (link to the relevant roadmap release from `project_status.md` when applicable).
 
+## 2026-02-10 — R0.3 prefix-affinity routing
+
+- New crate `warmpath-core`: chat template rendering, tokenization, and the
+  chained block hash. Shared by the router and the mock worker so each computes
+  hashes from the request body independently.
+- Block hashes chain parent into child, so a hash identifies a prefix rather
+  than a block. That is what lets the index be a flat map instead of a radix
+  tree, and prefix matching cost O(prompt blocks).
+- Approximate block index with in-flight block reservation, so a burst of
+  identical prefixes is not scattered before the first one completes.
+- Eviction is leaf-first, not plain least-recently-used. Plain LRU evicts a
+  chain's *first* block, which strands every block behind it and collapses the
+  modelled hit rate to zero while the modelled memory stays full.
+- Policies `prefix-affinity` and `prefix-affinity-balanced`, with cache and
+  balance thresholds. The plain one ignores load on purpose, so R0.4 can find
+  the workload where it hotspots.
+- Mock worker gains a simulated block-level prefix cache and prefill cost, which
+  is what makes cache-aware routing observable without a GPU. It exports
+  `prefix_cache_queries` and `prefix_cache_hits` in vLLM's shape.
+- `warmpath-bench` gains a workload with real prefix sharing: a pool of shared
+  prefixes, each request adding its own question.
+- `scripts/policy-compare.sh`: restarts workers per arm, rotates arm order
+  across repetitions, and reports the workers' own hit rate alongside latency.
+- Result: on an oversubscribed working set, affinity raises the workers'
+  reported hit rate from 35.6% to 89.1% and cuts p50 TTFT from 38.3ms to 8.5ms
+  at equal throughput. The p99 confidence intervals overlap at three runs, so
+  the tail improvement is not yet established, and `RESULTS.md` says so.
+- First documented crossover: when the working set fits in every worker's
+  cache, round-robin already hits on ~91% of blocks and affinity adds nothing.
+- Config sections now default field by field, so a partial `[server]` or
+  `[index]` table no longer fails to parse.
+- Spec cut to v3.0 mid-milestone: R0.1 through R0.5 are the commitment, and
+  what were R0.6 through R1.0 became Appendix A. Renumbered every stale release
+  reference in code comments and docs.
+- Added `automated_docs/retrospective.md`, a running log of findings and wrong
+  turns kept for an eventual write-up.
+- Next: close the tokenizer and block-hash fidelity gap, which the spec names as
+  the highest-risk item, then R0.4.
+
 ## 2026-02-06 — R0.2 measurement harness
 
 - New crate `warmpath-bench`: an open-loop load generator usable against any

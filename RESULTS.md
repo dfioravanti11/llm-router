@@ -6,6 +6,71 @@ inference; it is evidence about the harness and the router.
 
 Real vLLM enters at R0.5. Nothing below has touched a GPU.
 
+## Prefix-affinity routing against round-robin
+
+**Command:** `make policy-compare`
+
+Three mock workers, each caching 64 blocks. The workload is a pool of ten
+shared prefixes of about 16 blocks each, so the working set is roughly 160
+blocks: too much for any one worker to hold, and comfortable across the fleet.
+Each request carries one prefix plus its own short question. Sixty arrivals per
+second, open loop.
+
+Three repetitions per policy. Workers are restarted for every arm, so no policy
+inherits a cache another policy warmed, and the arm order rotates between
+repetitions.
+
+| policy | throughput | p50 TTFT | p99 TTFT | 95% CI on p99 | worker-reported hit rate |
+|---|---:|---:|---:|---:|---:|
+| round-robin | 58.6/s | 38.3 ms | 43.4 ms | [39.9, 47.8] ms | 35.6% |
+| prefix-affinity | 58.6/s | 8.5 ms | 33.1 ms | [27.7, 40.5] ms | 89.1% |
+| prefix-affinity-balanced | 58.6/s | 8.5 ms | 36.8 ms | [29.6, 42.7] ms | 89.2% |
+
+Two of those columns are worth believing and one is not yet.
+
+**The median improves by about 4.5x, and the hit rate explains why.** Round-robin
+shows every prefix to every worker, so each worker is asked to hold 160 blocks
+in 64 and spends the run evicting what it is about to need. Affinity partitions
+the prefixes across the fleet; each worker then holds a share that fits. The
+workers' own counters, which the router does not control, go from 35.6% to
+89.1% of blocks served from cache.
+
+**The p99 improvement is not established.** The intervals overlap:
+[39.9, 47.8] against [27.7, 40.5]. Three runs is the floor this project set for
+reporting anything, and at the tail it is not enough to separate these two. The
+honest statement is that affinity clearly improves the median and the hit rate,
+and that its effect on the tail is unresolved at this sample size. More
+repetitions would settle it, and R0.4 will need them.
+
+**The balanced policy is indistinguishable from the plain one here, as
+expected.** Nothing in this workload creates a hotspot: ten prefixes over three
+workers spread evenly on their own, so the balance override never fires and the
+two policies make the same choices. R0.4 exists to build the workload where
+that stops being true.
+
+### The crossover: when affinity buys nothing
+
+Covered by a test, in `crates/warmpath-bench/tests/affinity.rs`.
+
+Shrink the pool from ten prefixes to three and the whole working set fits in
+every worker's cache. Round-robin then hits on about 91% of blocks without any
+help, and affinity measures the same. There is nothing to arrange, and the only
+thing affinity adds is a constraint on where requests may go.
+
+This was found by accident: the first version of the comparison used three
+prefixes, and round-robin scored 91.2% against affinity's 94.4%. The workload
+was not oversubscribed, so it was not measuring routing at all. Cache-aware
+routing pays when the working set exceeds one worker's cache and fits across the
+fleet. Outside that band it is overhead.
+
+### What is not being claimed
+
+The mock worker's cache and the router's index are separate implementations on
+purpose, but both are models of the same idea, and they agree partly because
+they were written by someone with the same idea in mind. Agreement between them
+is not evidence. The predicted-versus-actual hit rate check only becomes real at
+R0.5, where the worker's cache is vLLM's and not a model at all.
+
 ## Closed-loop load generators under-report the tail
 
 **Command:** `make co-demo`
@@ -74,18 +139,10 @@ the harness marked all three runs invalid on a 100% error rate and refused to
 produce a campaign, which is the behaviour that makes the rest of this file
 worth reading.
 
-## Round-robin baseline
-
-**Command:** run a router and a worker, then `make bench`
-
-Not yet captured as a published figure. A baseline is only meaningful next to
-the thing it is a baseline for, and prefix affinity does not exist until R0.3.
-The harness, the run manifest, and the three-run confidence interval are in
-place, so R0.3 produces a comparison rather than a first attempt at one.
-
 ## What is not measured yet
 
-- Anything about cache hit rate. There is no block index.
 - Anything on real hardware. R0.5.
-- The router's own added latency. R0.9 measures it with flamegraphs and
+- A workload where the naive affinity policy hotspots and the balanced one
+  wins. R0.4.
+- The router's own added latency. R0.5 measures it with a flamegraph and
   publishes the number whether or not it is flattering.

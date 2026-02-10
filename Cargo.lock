@@ -957,10 +957,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memo-map"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "minijinja"
+version = "2.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42d74234349a775546a83af0f0c0c0e3a73227dee4950a542cda81a47240b3e6"
+dependencies = [
+ "memo-map",
+ "serde",
+]
 
 [[package]]
 name = "miniz_oxide"
@@ -2015,6 +2031,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "warmpath-core",
  "warmpath-mock",
 ]
 
@@ -2040,6 +2057,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "warmpath-core"
+version = "0.1.0"
+dependencies = [
+ "minijinja",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "warmpath-mock"
 version = "0.1.0"
 dependencies = [
@@ -2054,6 +2082,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "warmpath-core",
 ]
 
 [[package]]
@@ -2267,6 +2296,12 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
 
 [[package]]
 name = "yoke"

@@ -43,8 +43,28 @@ pub struct RunConfig {
     /// Leading window excluded from the reported summary.
     pub warmup_secs: f64,
     pub seed: u64,
-    /// Words in the generated prompt.
+    /// Free-text label recorded with the run, so a campaign can say which
+    /// configuration produced it. The generator cannot see the router's
+    /// policy, so this is how a comparison keeps its arms apart.
+    #[serde(default)]
+    pub label: String,
+    /// Words in the varying part of the generated prompt.
     pub prompt_words: usize,
+    /// Words in the shared prefix each request carries.
+    ///
+    /// Zero makes every prompt independent, which is the control condition:
+    /// with nothing shared there is no cache locality to exploit and every
+    /// policy should measure the same.
+    #[serde(default)]
+    pub shared_prefix_words: usize,
+    /// Distinct shared prefixes in circulation.
+    ///
+    /// One means every request shares one prefix, which any policy can serve
+    /// from a single warm worker. Larger pools are the interesting case: the
+    /// router has to keep several prefixes on several workers at once, which
+    /// is what a fleet actually faces.
+    #[serde(default)]
+    pub prefix_pool: usize,
     pub max_tokens: usize,
     pub stream: bool,
     /// A run whose p99 dispatch lag exceeds this is marked invalid.
@@ -130,7 +150,10 @@ mod tests {
             duration_secs: 1.0,
             warmup_secs: 0.0,
             seed: 1,
+            label: String::new(),
             prompt_words: 16,
+            shared_prefix_words: 0,
+            prefix_pool: 0,
             max_tokens: 8,
             stream: true,
             max_dispatch_lag_ms: 10.0,

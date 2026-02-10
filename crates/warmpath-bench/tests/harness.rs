@@ -8,7 +8,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use warmpath::config::{Config, Policy, RoutingConfig, ServerConfig, UpstreamConfig, WorkerConfig};
+use warmpath::config::{
+    AffinityConfig, Config, IndexConfig, Policy, RoutingConfig, ServerConfig, UpstreamConfig,
+    WorkerConfig,
+};
 use warmpath_bench::record::{Mode, RunConfig};
 use warmpath_bench::report::write_run;
 use warmpath_bench::{run_once, Campaign};
@@ -47,7 +50,9 @@ async fn spawn_router(workers: &[SocketAddr]) -> SocketAddr {
         upstream: UpstreamConfig::default(),
         routing: RoutingConfig {
             policy: Policy::RoundRobin,
+            affinity: AffinityConfig::default(),
         },
+        index: IndexConfig::default(),
         workers: workers
             .iter()
             .enumerate()
@@ -82,7 +87,10 @@ fn config(target: SocketAddr) -> RunConfig {
         duration_secs: 2.0,
         warmup_secs: 0.5,
         seed: 11,
+        label: String::new(),
         prompt_words: 32,
+        shared_prefix_words: 0,
+        prefix_pool: 0,
         max_tokens: 4,
         stream: true,
         max_dispatch_lag_ms: 50.0,

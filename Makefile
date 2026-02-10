@@ -1,4 +1,4 @@
-.PHONY: help build test fmt fmt-check lint check run-mock run bench co-demo clean
+.PHONY: help build test fmt fmt-check lint check run-mock run bench co-demo policy-compare clean
 
 help:
 	@echo "build      compile the workspace"
@@ -11,6 +11,7 @@ help:
 	@echo "run        start the router with config/warmpath.toml"
 	@echo "bench      three open-loop runs against a running router"
 	@echo "co-demo    the coordinated-omission comparison, start to finish"
+	@echo "policy-compare  routing policies measured against each other"
 
 build:
 	cargo build --workspace
@@ -30,7 +31,7 @@ lint:
 check: fmt-check lint test
 
 run-mock:
-	cargo run -p warmpath-mock -- --bind 127.0.0.1:8001
+	cargo run -p warmpath-mock -- --bind 127.0.0.1:8001 --cache-blocks 4096
 
 run:
 	cargo run -p warmpath -- --config config/warmpath.toml
@@ -44,6 +45,9 @@ bench:
 
 co-demo:
 	./scripts/co-demo.sh
+
+policy-compare:
+	./scripts/policy-compare.sh
 
 clean:
 	cargo clean
