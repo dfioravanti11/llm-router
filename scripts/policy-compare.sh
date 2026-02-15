@@ -32,14 +32,36 @@ WARMUP=${WARMUP:-5}
 RATE=${RATE:-60}
 WORKERS=${WORKERS:-3}
 
-# About 16 blocks per prefix once rendered. Ten of them is a 160 block working
-# set against 64 blocks per worker, so no worker can hold it alone.
+# A 256 word prefix is about 20 blocks under the model's tokenizer, so ten
+# prefixes are a working set near 200 blocks.
+#
+# The default gives each worker 112 blocks, so the fleet holds 336: no single
+# worker can hold the working set, but the fleet has room to spare once the
+# prefixes are partitioned. That is the regime cache-aware routing is for.
+#
+# Re-run with CACHE_BLOCKS=64 for the under-provisioned case, where the fleet
+# total sits just below the working set. Affinity still improves the median
+# there and stops improving the tail, which is a boundary worth knowing.
 PREFIX_WORDS=${PREFIX_WORDS:-256}
 PREFIX_POOL=${PREFIX_POOL:-10}
-CACHE_BLOCKS=${CACHE_BLOCKS:-64}
+CACHE_BLOCKS=${CACHE_BLOCKS:-112}
 BLOCK_SIZE=16
 
 POLICIES=${POLICIES:-"round-robin prefix-affinity prefix-affinity-balanced"}
+
+# The model's own tokenizer and chat template, when they have been fetched.
+# Both the router and the workers must use the same one, or they are cutting
+# blocks at different boundaries and describing different experiments.
+MODEL_DIR=${MODEL_DIR:-.cache/qwen3-1.7b}
+if [ -f "${MODEL_DIR}/tokenizer.json" ]; then
+  MOCK_MODEL_ARGS=(--model-dir "$MODEL_DIR")
+  ROUTER_MODEL_TOML=$'\n[model]\ndirectory = "'"${MODEL_DIR}"$'"\n'
+  echo "using the model tokenizer at ${MODEL_DIR}"
+else
+  MOCK_MODEL_ARGS=()
+  ROUTER_MODEL_TOML=""
+  echo "no model at ${MODEL_DIR}; using the development tokenizer. Run scripts/fetch-model.sh." >&2
+fi
 
 MOCK_BASE_PORT=${MOCK_BASE_PORT:-19001}
 ROUTER_PORT=${ROUTER_PORT:-19080}
@@ -75,6 +97,7 @@ start_workers() {
       --ttft-ms 1 --inter-token-ms 1 --max-concurrency 32 \
       --cache-blocks "$CACHE_BLOCKS" --block-size "$BLOCK_SIZE" \
       --prefill-per-token-us 120 \
+      ${MOCK_MODEL_ARGS[@]+"${MOCK_MODEL_ARGS[@]}"} \
       > "${OUT}/worker${index}.log" 2>&1 &
     # Captured into a variable first: macOS ships bash 3.2, which has no
     # negative array subscripts.
@@ -98,7 +121,7 @@ policy = "${policy}"
 [index]
 block_size = ${BLOCK_SIZE}
 block_budget = ${CACHE_BLOCKS}
-${worker_toml}
+${ROUTER_MODEL_TOML}${worker_toml}
 TOML
 
   ./target/release/warmpath --config "$config" >> "${OUT}/router.log" 2>&1 &

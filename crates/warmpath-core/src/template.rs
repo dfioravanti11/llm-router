@@ -55,8 +55,16 @@ pub enum ChatTemplate {
 
 impl ChatTemplate {
     /// Compile a model's chat template.
+    ///
+    /// Hugging Face renders these with Python's Jinja2, and real templates lean
+    /// on Python string methods: Qwen3's calls `startswith`, `endswith`,
+    /// `split`, `strip`, `lstrip`, and `rstrip`. A Rust Jinja engine has none
+    /// of those, so a compatibility shim is installed for unknown methods.
+    /// Without it the model's own template does not render at all.
     pub fn jinja(source: &str) -> Result<Self, TemplateError> {
         let mut environment = Environment::new();
+        environment
+            .set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
         environment
             .add_template_owned("chat", source.to_string())
             .map_err(|err| TemplateError::Parse(err.to_string()))?;

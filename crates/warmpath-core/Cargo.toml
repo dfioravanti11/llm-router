@@ -12,7 +12,9 @@ workspace = true
 
 [dependencies]
 minijinja = "2.23.0"
+minijinja-contrib = { version = "2.23.0", features = ["pycompat"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
+tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
 xxhash-rust = { version = "0.8.18", features = ["xxh64"] }

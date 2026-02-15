@@ -9,7 +9,7 @@
 //! a default.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -26,7 +26,27 @@ pub struct Config {
     pub routing: RoutingConfig,
     #[serde(default)]
     pub index: IndexConfig,
+    #[serde(default)]
+    pub model: ModelConfig,
     pub workers: Vec<WorkerConfig>,
+}
+
+/// Where the router gets its tokenizer and chat template.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ModelConfig {
+    /// Directory holding `tokenizer.json` and `tokenizer_config.json`, as
+    /// downloaded from the Hugging Face hub.
+    ///
+    /// Leave unset to use a deterministic development tokenizer. That is only
+    /// valid against the mock worker: against a real engine the router would be
+    /// cutting blocks at different boundaries than the worker, and the symptom
+    /// is a mediocre hit rate rather than an error.
+    ///
+    /// When this *is* set and the files cannot be loaded, startup fails. A
+    /// silent fall back to the development tokenizer is precisely the failure
+    /// this setting exists to prevent.
+    pub directory: Option<PathBuf>,
 }
 
 /// Which worker a request goes to.

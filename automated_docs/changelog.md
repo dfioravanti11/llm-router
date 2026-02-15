@@ -4,6 +4,32 @@ Notable changes to this project, newest first. Update this alongside any commit 
 
 Format per entry: `## YYYY-MM-DD — short title`, then a few bullets of what changed and why (link to the relevant roadmap release from `project_status.md` when applicable).
 
+## 2026-02-15 — Real tokenizer and chat template
+
+- `warmpath-core` gains `HuggingFaceTokenizer` and `ModelFiles`, which load a
+  model's `tokenizer.json` and the chat template out of its
+  `tokenizer_config.json`. `scripts/fetch-model.sh` downloads both for
+  Qwen3-1.7B, which is ungated so no token is needed.
+- Both the router and the mock worker take a model directory. A configured
+  directory that fails to load is a startup error rather than a fall back to the
+  development tokenizer, because that fall back is precisely the silent failure
+  this addresses.
+- Hugging Face chat templates are rendered by Python Jinja and call Python
+  string methods. Qwen3's uses `startswith`, `split`, and `strip`, none of which
+  minijinja has, so `minijinja-contrib`'s pycompat callback is now installed.
+  Without it the model's own template does not render.
+- Re-ran the policy comparison under the real tokenizer. The hit rate that the
+  development tokenizer reported as 89.1% is 80.9% under the model's own, since
+  the two cut blocks in different places.
+- New result, both regimes in `RESULTS.md`: with the fleet holding 336 blocks
+  against a working set near 200, affinity cuts p99 TTFT from 47.5ms to 19.5ms
+  with non-overlapping intervals. With the fleet at 192, below the working set,
+  the median still improves 3.4x and the p99 does not move, because the worst
+  one percent is full misses under every policy. Cache-aware routing needs the
+  fleet to have room for the working set.
+- Replaced a self-contradictory test that allowed 50ms of dispatch lag and then
+  asserted the two clocks agreed within 10ms.
+
 ## 2026-02-10 — R0.3 prefix-affinity routing
 
 - New crate `warmpath-core`: chat template rendering, tokenization, and the

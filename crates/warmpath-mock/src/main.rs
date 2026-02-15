@@ -46,6 +46,11 @@ struct Args {
     /// Prefill cost per uncached prompt token, in microseconds.
     #[arg(long, default_value_t = 50)]
     prefill_per_token_us: u64,
+
+    /// Directory holding the model's tokenizer.json and tokenizer_config.json.
+    /// Must be the same model the router is configured with.
+    #[arg(long)]
+    model_dir: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -62,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
         cache_blocks: args.cache_blocks,
         block_size: args.block_size,
         prefill_per_token: Duration::from_micros(args.prefill_per_token_us),
+        model_directory: args.model_dir,
     });
 
     let listener = TcpListener::bind(args.bind)

@@ -8,6 +8,7 @@
 //! model's tokenizer for anything that talks to vLLM.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Anything that can turn prompt text into token ids.
 pub trait Tokenizer: Send + Sync {
@@ -155,4 +156,73 @@ mod tests {
         assert_eq!(tokenizer.encode("warm the fridge"), vec![1, 2, 0]);
         assert_eq!(tokenizer.name(), "tiny");
     }
+}
+
+/// The model's own tokenizer, loaded from a Hugging Face `tokenizer.json`.
+///
+/// This is the one that matters. The router's block boundaries only line up
+/// with a worker's if both cut the same token sequence at the same points, and
+/// the only way to get the same token sequence is to run the same tokenizer.
+/// Everything else in this crate is exact; this is the part that has to be
+/// *the model's*.
+pub struct HuggingFaceTokenizer {
+    inner: tokenizers::Tokenizer,
+    name: String,
+}
+
+impl std::fmt::Debug for HuggingFaceTokenizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HuggingFaceTokenizer")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HuggingFaceTokenizer {
+    /// Load from a `tokenizer.json` on disk.
+    pub fn from_file(path: &Path, name: impl Into<String>) -> Result<Self, TokenizerError> {
+        let inner = tokenizers::Tokenizer::from_file(path)
+            .map_err(|err| TokenizerError::Load(err.to_string()))?;
+        Ok(Self {
+            inner,
+            name: name.into(),
+        })
+    }
+
+    pub fn vocabulary_size(&self) -> usize {
+        self.inner.get_vocab_size(true)
+    }
+}
+
+impl Tokenizer for HuggingFaceTokenizer {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        // Special tokens are *not* added here. The chat template has already
+        // written every marker the model expects into the text, so letting the
+        // tokenizer add more would produce a sequence the worker never sees.
+        match self.inner.encode(text, false) {
+            Ok(encoding) => encoding.get_ids().to_vec(),
+            Err(error) => {
+                // A prompt that will not tokenize costs this request its cache
+                // affinity and nothing else. Failing the request instead would
+                // turn a routing optimization into an availability risk.
+                tracing_encode_failure(&error.to_string());
+                Vec::new()
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Kept as a function so the dependency on a logging crate stays in one place.
+fn tracing_encode_failure(message: &str) {
+    eprintln!("warmpath: tokenizer failed to encode a prompt: {message}");
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TokenizerError {
+    #[error("failed to load tokenizer: {0}")]
+    Load(String),
 }

@@ -7,14 +7,16 @@
 //! a silent agreement between two copies of the same mistake.
 
 pub mod blocks;
+pub mod model;
 pub mod template;
 pub mod tokenizer;
 
 use serde::{Deserialize, Serialize};
 
 pub use blocks::{hash_chain, shared_prefix_len, BlockHash, DEFAULT_BLOCK_SIZE};
+pub use model::{ModelError, ModelFiles};
 pub use template::{ChatTemplate, Message, TemplateError};
-pub use tokenizer::{Tokenizer, VocabTokenizer, WordTokenizer};
+pub use tokenizer::{HuggingFaceTokenizer, Tokenizer, VocabTokenizer, WordTokenizer};
 
 /// What the router needs to know about a request in order to route it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

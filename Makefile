@@ -1,4 +1,4 @@
-.PHONY: help build test fmt fmt-check lint check run-mock run bench co-demo policy-compare clean
+.PHONY: help build test fmt fmt-check lint check fetch-model run-mock run bench co-demo policy-compare clean
 
 help:
 	@echo "build      compile the workspace"
@@ -7,6 +7,7 @@ help:
 	@echo "fmt-check  fail if the workspace is unformatted"
 	@echo "lint       clippy with warnings denied"
 	@echo "check      fmt-check + lint + test, the same gate CI runs"
+	@echo "fetch-model  download the model tokenizer and chat template"
 	@echo "run-mock   start one mock worker on 127.0.0.1:8001"
 	@echo "run        start the router with config/warmpath.toml"
 	@echo "bench      three open-loop runs against a running router"
@@ -29,6 +30,9 @@ lint:
 	cargo clippy --workspace --all-targets -- -D warnings
 
 check: fmt-check lint test
+
+fetch-model:
+	./scripts/fetch-model.sh
 
 run-mock:
 	cargo run -p warmpath-mock -- --bind 127.0.0.1:8001 --cache-blocks 4096

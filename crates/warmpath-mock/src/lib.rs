@@ -9,6 +9,7 @@
 pub mod cache;
 pub mod chat;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +19,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
-use warmpath_core::PromptBuilder;
+use warmpath_core::{ModelFiles, PromptBuilder};
 
 use crate::cache::{CacheStats, PrefixCache};
 
@@ -50,6 +51,15 @@ pub struct MockConfig {
     /// This is the entire reason cache-aware routing shows up in a latency
     /// measurement: a cached prefix skips it.
     pub prefill_per_token: Duration,
+    /// Directory holding the model's `tokenizer.json` and
+    /// `tokenizer_config.json`.
+    ///
+    /// The worker fingerprints requests itself, so it needs the same tokenizer
+    /// the router uses. Running the two on different tokenizers would have them
+    /// cutting blocks at different boundaries, which makes the worker's
+    /// reported hit rate describe a different experiment than the router's
+    /// routing decisions.
+    pub model_directory: Option<PathBuf>,
 }
 
 impl Default for MockConfig {
@@ -63,6 +73,7 @@ impl Default for MockConfig {
             cache_blocks: 0,
             block_size: warmpath_core::DEFAULT_BLOCK_SIZE,
             prefill_per_token: Duration::from_micros(50),
+            model_directory: None,
         }
     }
 }
@@ -109,10 +120,23 @@ pub struct MockState {
 }
 
 impl MockState {
+    /// Build the worker.
+    ///
+    /// Panics if a model directory is configured but cannot be loaded. Falling
+    /// back to the development tokenizer would leave the worker modelling a
+    /// cache over different block boundaries than the router routes on, and the
+    /// symptom would be a poor hit rate rather than an error.
     pub fn new(config: MockConfig) -> Self {
         let slots = Arc::new(Semaphore::new(config.max_concurrency.max(1)));
         let cache = Mutex::new(PrefixCache::new(config.cache_blocks));
-        let prompts = PromptBuilder::simple(config.block_size);
+        let prompts = match &config.model_directory {
+            Some(directory) => ModelFiles::new(directory.clone())
+                .load(config.block_size)
+                .unwrap_or_else(|err| {
+                    panic!("failed to load the model at {}: {err}", directory.display())
+                }),
+            None => PromptBuilder::simple(config.block_size),
+        };
         Self {
             inner: Arc::new(Inner {
                 config,

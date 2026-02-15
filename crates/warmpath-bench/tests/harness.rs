@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use warmpath::config::{
-    AffinityConfig, Config, IndexConfig, Policy, RoutingConfig, ServerConfig, UpstreamConfig,
-    WorkerConfig,
+    AffinityConfig, Config, IndexConfig, ModelConfig, Policy, RoutingConfig, ServerConfig,
+    UpstreamConfig, WorkerConfig,
 };
 use warmpath_bench::record::{Mode, RunConfig};
 use warmpath_bench::report::write_run;
@@ -53,6 +53,7 @@ async fn spawn_router(workers: &[SocketAddr]) -> SocketAddr {
             affinity: AffinityConfig::default(),
         },
         index: IndexConfig::default(),
+        model: ModelConfig::default(),
         workers: workers
             .iter()
             .enumerate()
@@ -157,21 +158,32 @@ async fn an_unloaded_run_shows_no_coordinated_omission_gap() {
 
     let (report, _) = run_once(&config(router)).await.expect("run should finish");
 
-    // Nothing is queueing, so the two views of the same requests should agree.
-    // The gap is a symptom of overload, not an artefact of the measurement.
+    // The generator kept up within its own declared budget, so this run's
+    // numbers are the ones it claims to be.
+    assert!(
+        report.validity.valid,
+        "the generator fell behind: {:?}",
+        report.validity.reasons
+    );
+
+    // The gap between the two clocks is the dispatch lag, request by request:
+    // `intended_latency = dispatch_latency + lag`. Since every lag is at most
+    // the largest one, every percentile of the intended-time distribution can
+    // exceed the same percentile of the dispatch-time one by at most that
+    // maximum. Asserting the bound rather than an arbitrary millisecond figure
+    // keeps the test honest on a machine that is busy running the rest of the
+    // suite, where a fixed threshold would only be measuring the test runner.
     //
-    // Compared in absolute terms rather than as a ratio: against a worker that
-    // answers in a couple of milliseconds, a fraction of a millisecond of
-    // scheduling jitter is a large ratio and a small problem. The gap is
-    // dispatch lag, so bounding it in milliseconds is the statement that
-    // actually matters.
+    // The tolerance covers HdrHistogram's three significant figures.
+    let ceiling = report.validity.max_dispatch_lag_us + report.validity.max_dispatch_lag_us / 100;
     for gap in &report.omission_gap_ttft {
         let difference_us = gap.from_intended_us.saturating_sub(gap.from_dispatch_us);
         assert!(
-            difference_us < 10_000,
-            "p{} was {:.1}ms late against dispatch on an unloaded run",
+            difference_us <= ceiling,
+            "p{} differed by {:.1}ms, more than the {:.1}ms largest dispatch lag",
             gap.percentile,
-            difference_us as f64 / 1_000.0
+            difference_us as f64 / 1_000.0,
+            ceiling as f64 / 1_000.0
         );
     }
 }

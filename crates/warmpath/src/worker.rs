@@ -202,7 +202,7 @@ impl WorkerPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{IndexConfig, RoutingConfig, ServerConfig, UpstreamConfig};
+    use crate::config::{IndexConfig, ModelConfig, RoutingConfig, ServerConfig, UpstreamConfig};
     use crate::policy::DecisionReason;
     use warmpath_core::BlockHash;
 
@@ -215,6 +215,7 @@ mod tests {
                 affinity: AffinityConfig::default(),
             },
             index: IndexConfig::default(),
+            model: ModelConfig::default(),
             workers: (0..worker_count)
                 .map(|index| WorkerConfig {
                     name: format!("w{index}"),

@@ -10,66 +10,111 @@ Real vLLM enters at R0.5. Nothing below has touched a GPU.
 
 **Command:** `make policy-compare`
 
-Three mock workers, each caching 64 blocks. The workload is a pool of ten
-shared prefixes of about 16 blocks each, so the working set is roughly 160
-blocks: too much for any one worker to hold, and comfortable across the fleet.
-Each request carries one prefix plus its own short question. Sixty arrivals per
-second, open loop.
+Three mock workers. The workload is a pool of ten shared prefixes of 256 words
+each, and every request carries one prefix plus its own short question. Sixty
+arrivals per second, open loop, three repetitions per policy, about 5,400
+measured requests each.
 
-Three repetitions per policy. Workers are restarted for every arm, so no policy
-inherits a cache another policy warmed, and the arm order rotates between
-repetitions.
+Prompts are rendered with Qwen3-1.7B's own chat template and tokenized with its
+own tokenizer, so the block boundaries are the ones a real worker would use. At
+about 21 blocks per request (37,722 blocks queried per run across roughly 1,800
+requests), ten prefixes come to a working set near 200 blocks.
+
+Workers are restarted for every arm, so no policy inherits a cache another
+warmed, and the arm order rotates between repetitions.
+
+### With enough cache in the fleet
+
+Each worker holds 112 blocks, so the fleet holds 336 against a working set near
+200. No single worker can hold it; the fleet can, once the prefixes are
+partitioned.
 
 | policy | throughput | p50 TTFT | p99 TTFT | 95% CI on p99 | worker-reported hit rate |
 |---|---:|---:|---:|---:|---:|
-| round-robin | 58.6/s | 38.3 ms | 43.4 ms | [39.9, 47.8] ms | 35.6% |
-| prefix-affinity | 58.6/s | 8.5 ms | 33.1 ms | [27.7, 40.5] ms | 89.1% |
-| prefix-affinity-balanced | 58.6/s | 8.5 ms | 36.8 ms | [29.6, 42.7] ms | 89.2% |
+| round-robin | 59.0/s | 13.4 ms | 47.5 ms | [41.1, 53.2] ms | 52.1% |
+| prefix-affinity | 59.0/s | 12.4 ms | 19.5 ms | [9.1, 33.2] ms | 88.4% |
 
-Two of those columns are worth believing and one is not yet.
+This is the result the project exists to produce. The p99 intervals do not
+overlap, so the tail improvement is real at three runs: 47.5ms against 19.5ms.
+The workers' own counters, which the router does not control, go from 52.1% to
+88.4% of blocks served from cache.
 
-**The median improves by about 4.5x, and the hit rate explains why.** Round-robin
-shows every prefix to every worker, so each worker is asked to hold 160 blocks
-in 64 and spends the run evicting what it is about to need. Affinity partitions
-the prefixes across the fleet; each worker then holds a share that fits. The
-workers' own counters, which the router does not control, go from 35.6% to
-89.1% of blocks served from cache.
+The medians are close because at this capacity round-robin already hits often
+enough that a typical request is mostly cached. The difference is in the tail,
+which is exactly where it matters and exactly what a closed-loop harness would
+have hidden.
 
-**The p99 improvement is not established.** The intervals overlap:
-[39.9, 47.8] against [27.7, 40.5]. Three runs is the floor this project set for
-reporting anything, and at the tail it is not enough to separate these two. The
-honest statement is that affinity clearly improves the median and the hit rate,
-and that its effect on the tail is unresolved at this sample size. More
-repetitions would settle it, and R0.4 will need them.
+### With the fleet slightly under-provisioned
 
-**The balanced policy is indistinguishable from the plain one here, as
-expected.** Nothing in this workload creates a hotspot: ten prefixes over three
-workers spread evenly on their own, so the balance override never fires and the
-two policies make the same choices. R0.4 exists to build the workload where
-that stops being true.
+**Command:** `CACHE_BLOCKS=64 make policy-compare`
 
-### The crossover: when affinity buys nothing
+Each worker holds 64 blocks, so the fleet holds 192 against the same working set
+near 200. Even a perfect partition does not quite fit.
+
+| policy | throughput | p50 TTFT | p99 TTFT | 95% CI on p99 | worker-reported hit rate |
+|---|---:|---:|---:|---:|---:|
+| round-robin | 59.0/s | 41.0 ms | 44.6 ms | [39.1, 53.5] ms | 31.3% |
+| prefix-affinity | 59.0/s | 12.2 ms | 44.3 ms | [40.9, 49.3] ms | 80.9% |
+| prefix-affinity-balanced | 59.0/s | 13.6 ms | 46.1 ms | [8.1, 104.2] ms | 81.4% |
+
+Here the median improves by 3.4x and the hit rate by more than half, and the
+**p99 does not move at all**.
+
+The mechanism is visible once the numbers are read together. Time to first
+token is a small fixed cost plus prefill for whatever was not cached, so a full
+miss on a 20 block prefix costs about 45ms and a full hit costs almost nothing.
+Affinity moves most requests from miss to hit, which is the median. But with the
+fleet total below the working set, eviction churn never stops, so about one
+request in a hundred still misses completely no matter where it is sent. The
+worst one percent is made of full misses under every policy, and that is the
+p99.
+
+Together the two tables say something neither says alone: **cache-aware routing
+needs the fleet to have enough aggregate cache to hold the working set.** Below
+that line it still improves the median, and it stops improving the tail.
+
+### The other crossover: when affinity buys nothing at all
 
 Covered by a test, in `crates/warmpath-bench/tests/affinity.rs`.
 
-Shrink the pool from ten prefixes to three and the whole working set fits in
-every worker's cache. Round-robin then hits on about 91% of blocks without any
-help, and affinity measures the same. There is nothing to arrange, and the only
-thing affinity adds is a constraint on where requests may go.
+Shrink the pool so the whole working set fits in *every* worker's cache and
+round-robin hits on about 91% of blocks unaided. Affinity measures the same,
+because there is nothing left to arrange.
 
-This was found by accident: the first version of the comparison used three
-prefixes, and round-robin scored 91.2% against affinity's 94.4%. The workload
-was not oversubscribed, so it was not measuring routing at all. Cache-aware
-routing pays when the working set exceeds one worker's cache and fits across the
-fleet. Outside that band it is overhead.
+So the technique pays inside a band: the working set has to exceed one worker's
+cache, and the fleet has to have room for it. Below the band it is unnecessary;
+above it, it helps the median but not the tail.
+
+This was found by accident. The first version of the comparison used three
+prefixes, round-robin scored 91.2% against affinity's 94.4%, and the workload
+turned out not to be oversubscribed at all. It was not measuring routing.
 
 ### What is not being claimed
 
+The balanced policy is not distinguishable from the plain one on this workload.
+Nothing here creates a hotspot, so the balance override never fires and the two
+make the same choices. Its wide interval in the under-provisioned table
+([8.1, 104.2] ms) is noise, not a signal. Building the workload where the two
+diverge is R0.4.
+
 The mock worker's cache and the router's index are separate implementations on
-purpose, but both are models of the same idea, and they agree partly because
-they were written by someone with the same idea in mind. Agreement between them
-is not evidence. The predicted-versus-actual hit rate check only becomes real at
-R0.5, where the worker's cache is vLLM's and not a model at all.
+purpose, but both are models of the same idea, and they agree partly because one
+person wrote both with the same idea in mind. Agreement between them is not
+evidence. The predicted-versus-actual hit rate check only becomes real at R0.5,
+where the worker's cache is vLLM's and not a model at all.
+
+### Tokenizer choice changes the measurement
+
+An earlier version of this comparison used a development whitespace tokenizer
+instead of the model's. On the identical workload it reported an 89.1% hit rate
+where the real tokenizer reports 80.9%, because the two cut the prompt into
+blocks at different places.
+
+Neither number is wrong about its own experiment, which is the problem: the
+difference is invisible from inside a run. It is a small, concrete instance of
+the failure the spec names as the project's highest risk, and the reason the
+router now refuses to start when a configured model directory will not load
+rather than falling back to the development tokenizer.
 
 ## Closed-loop load generators under-report the tail
 

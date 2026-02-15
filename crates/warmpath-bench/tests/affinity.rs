@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use warmpath::config::{
-    AffinityConfig, Config, IndexConfig, Policy, RoutingConfig, ServerConfig, UpstreamConfig,
-    WorkerConfig,
+    AffinityConfig, Config, IndexConfig, ModelConfig, Policy, RoutingConfig, ServerConfig,
+    UpstreamConfig, WorkerConfig,
 };
 use warmpath_bench::record::{Mode, RunConfig};
 use warmpath_bench::{run_once, RunReport};
@@ -97,6 +97,7 @@ async fn spawn_fleet(policy: Policy, worker_count: usize) -> Fleet {
             // is a guess, and R0.5 measures what that guess costs.
             block_budget: CACHE_BLOCKS,
         },
+        model: ModelConfig::default(),
         workers: addresses
             .iter()
             .enumerate()

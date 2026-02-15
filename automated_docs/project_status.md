@@ -19,7 +19,7 @@ GPU is required only at R0.5.
 |---|---|---|---|
 | R0.1 | Skeleton — correct proxy, does nothing clever | Client disconnect provably frees the worker slot; SSE bytes match upstream exactly | Done |
 | R0.2 | Honest measurement — the harness, before any policy | Baseline p99 TTFT with CI from ≥3 runs, reproducible by one command; open-vs-closed-loop coordinated-omission demo | Done |
-| R0.3 | The core idea — prefix-affinity routing | First affinity-vs-round-robin comparison with CIs on mocks; hash-correctness test passing | Partly done — see below |
+| R0.3 | The core idea — prefix-affinity routing | First affinity-vs-round-robin comparison with CIs on mocks; hash-correctness test passing | Done, except the half of the hash check that needs vLLM |
 | R0.4 | Load-aware and session-aware | A workload where pure affinity loses and balanced affinity wins, documented | Not started |
 | R0.5 | Reality, and ship | A stranger can `docker compose up`, run `make bench`, and regenerate every published number | Not started |
 
@@ -27,20 +27,18 @@ Appendix A, closed until R0.5 ships: A1 reliability engineering, A2 precise
 indexing via vLLM KV events, A3 agentic workloads, A4 a blog post, A5
 disaggregation or sharded routers.
 
-### R0.3 is not fully closed
+### What is still open from R0.3
 
-The comparison, the index, the reservation, and the policies are done and
-tested. What is missing is the part the spec calls the highest-risk item in the
-project: the router currently tokenizes with a deterministic whitespace
-tokenizer and renders with a chat template of its own design, so nothing has
-been checked against a real model's tokenization or against vLLM's block hash
-construction. A mismatch there fails silently, producing mediocre hit rates that
-read as a weak result rather than a bug.
+The router now renders with the model's own chat template and tokenizes with
+its own tokenizer, so it cuts prompts into the same tokens and the same blocks
+a real worker would. That closes the part of the highest-risk item that can be
+closed without hardware.
 
-Part of that needs a GPU and belongs to R0.5. Part of it does not: the real
-Qwen3-1.7B tokenizer and chat template can be exercised on a laptop, and vLLM's
-hash construction can be implemented from its source. Closing the CPU-side part
-is the next work item, ahead of R0.4.
+What remains needs vLLM: comparing the router's predicted hit rate against
+`vllm:prefix_cache_queries` and `vllm:prefix_cache_hits` on a known workload.
+Until then the mock worker's agreement with the router is not evidence, since
+both are models written by the same person from the same idea. That comparison
+is an R0.5 exit criterion.
 
 ## What's been accomplished
 
@@ -104,6 +102,6 @@ than a reading of one.
 
 From `project_spec.md` §2.2 — surface these if they start to materialize:
 - Mock cache model might not be realistic enough to survive real vLLM (checked at the R0.5 gate; divergence is itself a publishable finding).
-- **Tokenization/hashing mismatch with vLLM, the highest-risk item.** It fails silently. Currently open: see the R0.3 note above.
+- **Tokenization mismatch with vLLM, the highest-risk item.** It fails silently. Largely closed: the router uses the model's own tokenizer and chat template, and refuses to start rather than falling back. The remaining half needs vLLM, at R0.5.
 - Scope creep back into Appendix A. It is closed until R0.5 ships.
 - GPU cost overrun (mitigated by bounding validation sessions to spot instances).

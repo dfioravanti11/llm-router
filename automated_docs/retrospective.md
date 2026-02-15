@@ -195,6 +195,69 @@ Closing the CPU-side part of this is the next piece of work, ahead of R0.4.
 
 ---
 
+## Closing the tokenizer and template gap
+
+Taken on immediately after R0.3 was committed, because the spec names it the
+highest-risk item and the reason is that it fails silently.
+
+**The risk is narrower than it first appears, and worth stating precisely.** The
+router's block hashes are its own and never leave it, so they do not have to
+equal anything vLLM computes. What has to be equal is the layer underneath: the
+token sequence, and where the 16-token boundaries fall in it. If the router
+tokenizes or renders differently from the worker, prefixes that the worker
+considers shared are not shared here, and the only symptom is a mediocre hit
+rate that reads as a weak result. So the fix is to run the model's own tokenizer
+and the model's own chat template, which needs no GPU at all. Only the final
+predicted-versus-actual hit rate comparison needs hardware, and that is R0.5.
+
+**Hugging Face chat templates are Python Jinja, and a Rust Jinja engine is not
+enough.** Qwen3-1.7B's template calls `startswith`, `endswith`, `split`,
+`strip`, `lstrip`, and `rstrip` on strings. minijinja has none of them, so the
+real template failed to render with `unknown method: string has no method named
+startswith`. Fixed with `minijinja-contrib`'s `pycompat` unknown-method
+callback. Worth noting that this failed *loudly*, which was luck as much as
+design: a renderer that fell back to a simpler template on error would have
+produced exactly the silent mediocre-hit-rate failure the whole exercise is
+about. The router now refuses to start when a configured model cannot be
+loaded, for the same reason.
+
+**The tokenizer changes the answer.** Re-running the identical policy comparison
+with the model's tokenizer instead of the development one moved the reported hit
+rate from 89.1% to 80.9%, because the two cut the prompt into blocks in
+different places. Neither run is wrong about itself, and from inside either one
+the discrepancy is invisible. That is the risk in miniature, and it is now a
+paragraph in `RESULTS.md`.
+
+**A test that contradicted itself.** The unloaded coordinated-omission test
+allowed 50ms of dispatch lag as valid and then asserted the gap between the two
+clocks was under 10ms. The gap *is* the lag, so on a machine busy running the
+rest of the suite the test failed itself. Replaced with the actual invariant:
+per request, `intended_latency = dispatch_latency + lag`, so every percentile of
+the intended-time distribution exceeds the same percentile of the dispatch-time
+one by at most the largest observed lag. That is guaranteed by construction, and
+it does not degrade into measuring the test runner.
+
+**The flat p99 had a mechanism, and finding it turned a shrug into a result.**
+With the real tokenizer the comparison showed the median improving 3.4x and the
+hit rate going from 31.3% to 80.9% while the p99 did not move at all. Rather
+than reporting that as unresolved, the arithmetic was worth doing: at about 21
+blocks per request the ten-prefix pool is a working set near 200 blocks, and
+three workers at 64 blocks each hold 192. Even a perfect partition does not fit,
+so eviction churn never stops and roughly one request in a hundred misses
+entirely under every policy. The worst one percent is made of full misses, which
+is the p99.
+
+Re-running with 112 blocks per worker, so the fleet holds 336 against the same
+200, separated the tail cleanly: p99 47.5ms for round-robin against 19.5ms for
+affinity, with intervals that do not overlap. So the honest finding is a
+condition rather than a number: cache-aware routing needs the fleet to have
+enough aggregate cache to hold the working set, and below that line it improves
+the median and stops improving the tail. That is a better result than the one
+originally hoped for, and it came from taking a disappointing number seriously
+instead of reporting it as noise.
+
+---
+
 ## Scope change, spec v3.0
 
 The spec was cut from ten releases to five while R0.3 was being committed.

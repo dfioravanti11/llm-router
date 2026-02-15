@@ -44,6 +44,17 @@ block_size = 16
 # This is a guess about the engine's capacity, not a reading of it.
 block_budget = 65536
 
+[model]
+# Directory holding tokenizer.json and tokenizer_config.json, from
+# `make fetch-model`. Commented out means the router uses a deterministic
+# development tokenizer, which is only valid against the mock worker: against a
+# real engine the router would cut blocks at different boundaries than the
+# worker, and the symptom is a mediocre hit rate rather than an error.
+#
+# When this is set and the files cannot be loaded, startup fails rather than
+# falling back, because a silent fallback is exactly that failure.
+# directory = ".cache/qwen3-1.7b"
+
 [[workers]]
 name = "w0"
 url = "http://127.0.0.1:8001"
