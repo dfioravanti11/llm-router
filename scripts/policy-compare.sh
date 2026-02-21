@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 #
-# Compare routing policies on one workload.
-#
-# The workload is a pool of long shared prefixes, each request adding its own
-# short question. The workers' caches are sized so the whole pool does not fit
-# on any single worker but does fit across the fleet, which is the regime where
-# where a request goes decides whether it hits.
+# Compare routing policies on one workload shape.
 #
 # Three things keep this a comparison rather than a story:
 #
@@ -29,7 +24,6 @@ RUNS=${RUNS:-3}
 # requests per policy, which clears the spec's floor of 5,000.
 DURATION=${DURATION:-35}
 WARMUP=${WARMUP:-5}
-RATE=${RATE:-60}
 WORKERS=${WORKERS:-3}
 
 # A 256 word prefix is about 20 blocks under the model's tokenizer, so ten
@@ -47,7 +41,58 @@ PREFIX_POOL=${PREFIX_POOL:-10}
 CACHE_BLOCKS=${CACHE_BLOCKS:-112}
 BLOCK_SIZE=16
 
-POLICIES=${POLICIES:-"round-robin prefix-affinity prefix-affinity-balanced"}
+POLICIES=${POLICIES:-"round-robin least-loaded power-of-two prefix-affinity prefix-affinity-balanced"}
+
+# Workload shape.
+#
+#   even    every prefix equally popular. Nothing hotspots, so this isolates
+#           cache locality.
+#   skewed  most requests share one prefix, as real traffic does. A policy that
+#           only maximises locality sends most of the fleet's work to one
+#           worker.
+SHAPE=${SHAPE:-even}
+case "$SHAPE" in
+  even)
+    HOT_SHARE=0
+    MAX_TOKENS=4
+    WORKER_CONCURRENCY=32
+    INTER_TOKEN_MS=1
+    RATE=${RATE:-60}
+    ;;
+  skewed)
+    HOT_SHARE=0.8
+    # Decode is not helped by the prefix cache, so a request holds a slot for
+    # about 64ms whether or not its prefill hit. Without that, the worker
+    # holding the hot prefix is the fastest one, concentrating traffic on it
+    # costs nothing, and there is no hotspot to route around.
+    # Eight tokens at 8ms is the same 64ms of worker occupancy as 32 at 2ms,
+    # with a quarter of the timer wakeups and SSE chunks. The router, three
+    # workers, and the load generator all share one laptop here, and the finer
+    # schedule was enough to make the generator itself fall behind, which
+    # correctly invalidated the run.
+    MAX_TOKENS=8
+    WORKER_CONCURRENCY=4
+    INTER_TOKEN_MS=8
+    # A worker with four slots and 64ms per request serves about 62/s. Eighty
+    # percent of sixty arrivals a second is 48, so the hot worker sits near 77%
+    # utilization: deep enough to queue, stable enough to have a steady state.
+    #
+    # Offering more does not make a better experiment. Past the hot worker's
+    # capacity the queue grows for as long as the run lasts, so the reported
+    # tail becomes a function of run length, and far enough past it the
+    # generator itself falls behind and the run is correctly thrown out. The
+    # fleet as a whole is at about a third of capacity either way, so only the
+    # hotspot is under pressure.
+    RATE=${RATE:-60}
+    ;;
+  *)
+    echo "unknown SHAPE '${SHAPE}'; expected even or skewed" >&2
+    exit 1
+    ;;
+esac
+
+MOCK_BASE_PORT=${MOCK_BASE_PORT:-19001}
+ROUTER_PORT=${ROUTER_PORT:-19080}
 
 # The model's own tokenizer and chat template, when they have been fetched.
 # Both the router and the workers must use the same one, or they are cutting
@@ -62,9 +107,6 @@ else
   ROUTER_MODEL_TOML=""
   echo "no model at ${MODEL_DIR}; using the development tokenizer. Run scripts/fetch-model.sh." >&2
 fi
-
-MOCK_BASE_PORT=${MOCK_BASE_PORT:-19001}
-ROUTER_PORT=${ROUTER_PORT:-19080}
 
 cargo build --release --workspace
 mkdir -p "$OUT"
@@ -94,7 +136,8 @@ start_workers() {
   for index in $(seq 0 $((WORKERS - 1))); do
     ./target/release/warmpath-mock \
       --bind "127.0.0.1:$((MOCK_BASE_PORT + index))" \
-      --ttft-ms 1 --inter-token-ms 1 --max-concurrency 32 \
+      --ttft-ms 1 --inter-token-ms "$INTER_TOKEN_MS" \
+      --max-concurrency "$WORKER_CONCURRENCY" \
       --cache-blocks "$CACHE_BLOCKS" --block-size "$BLOCK_SIZE" \
       --prefill-per-token-us 120 \
       ${MOCK_MODEL_ARGS[@]+"${MOCK_MODEL_ARGS[@]}"} \
@@ -121,6 +164,9 @@ policy = "${policy}"
 [index]
 block_size = ${BLOCK_SIZE}
 block_budget = ${CACHE_BLOCKS}
+
+[health]
+poll_interval_ms = 100
 ${ROUTER_MODEL_TOML}${worker_toml}
 TOML
 
@@ -154,7 +200,7 @@ policy_list() {
 for repetition in $(seq 1 "$RUNS"); do
   for policy in $(policy_list "$repetition"); do
     echo
-    echo "=== ${policy}, repetition ${repetition} of ${RUNS} ==="
+    echo "=== ${SHAPE} / ${policy}, repetition ${repetition} of ${RUNS} ==="
 
     # Fresh workers per arm: every policy starts from an empty cache, and the
     # warmup window absorbs the cold start.
@@ -165,10 +211,11 @@ for repetition in $(seq 1 "$RUNS"); do
       --target "http://127.0.0.1:${ROUTER_PORT}" \
       --rate "$RATE" --duration "$DURATION" --warmup "$WARMUP" \
       --runs 1 --seed "$((100 + repetition))" --settle 0 \
-      --prompt-words 24 --max-tokens 4 \
+      --prompt-words 24 --max-tokens "$MAX_TOKENS" \
       --shared-prefix-words "$PREFIX_WORDS" --prefix-pool "$PREFIX_POOL" \
+      --hot-prefix-share "$HOT_SHARE" \
       --max-dispatch-lag-ms 100 \
-      --label "$policy" \
+      --label "${SHAPE}/${policy}" \
       --out "${OUT}/${policy}"
 
     # The workers' own view, which is the number the router does not control.
@@ -184,7 +231,7 @@ for repetition in $(seq 1 "$RUNS"); do
 done
 
 echo
-echo "=== aggregating ==="
+echo "=== ${SHAPE} workload ==="
 for policy in $POLICIES; do
   ./target/release/warmpath-bench aggregate \
     "${OUT}/${policy}"/*/ --out "${OUT}/${policy}/campaign.json" > /dev/null
@@ -197,30 +244,45 @@ import sys
 
 base, policies, runs = sys.argv[1], sys.argv[2].split(), int(sys.argv[3])
 
-print(f"{'policy':<26} {'throughput':>12} {'p50 TTFT':>12} {'p99 TTFT':>12} {'95% CI on p99':>24}")
+print(
+    f"{'policy':<26} {'throughput':>11} {'p50 TTFT':>10} {'p99 TTFT':>10} "
+    f"{'95% CI on p99':>22} {'hit rate':>9} {'busiest':>8}"
+)
+
 for policy in policies:
     metrics = json.load(open(f"{base}/{policy}/campaign.json"))["metrics"]
     p99 = metrics["ttft_from_intended_p99_us"]
     half = p99["ci95_half_width"] or 0.0
     interval = f"[{(p99['mean'] - half) / 1000:.1f}, {(p99['mean'] + half) / 1000:.1f}] ms"
-    print(
-        f"{policy:<26} {metrics['achieved_rate_per_second']['median']:>9.1f}/s "
-        f"{metrics['ttft_from_intended_p50_us']['median'] / 1000:>10.1f}ms "
-        f"{p99['median'] / 1000:>10.1f}ms {interval:>24}"
-    )
 
-print()
-print(f"worker-reported prefix cache hit rate, in blocks, over {runs} run(s)")
-for policy in policies:
+    # The workers' own counters: prefix cache hit rate, and the share of the
+    # fleet's requests the busiest worker took. A third is even across three
+    # workers; anything near one is a hotspot.
     queries = hits = 0
+    concentration = []
     for path in sorted(glob.glob(f"{base}/{policy}/worker-stats-*.jsonl")):
+        started = []
         for line in open(path):
             line = line.strip()
             if not line:
                 continue
-            cache = json.loads(line)["cache"]
-            queries += cache["prefix_cache_queries"]
-            hits += cache["prefix_cache_hits"]
-    rate = hits / queries if queries else 0.0
-    print(f"  {policy:<26} {rate:>6.1%}   ({hits} of {queries} blocks)")
+            stats = json.loads(line)
+            queries += stats["cache"]["prefix_cache_queries"]
+            hits += stats["cache"]["prefix_cache_hits"]
+            started.append(stats["started"])
+        if started and sum(started):
+            concentration.append(max(started) / sum(started))
+
+    hit_rate = f"{hits / queries:.1%}" if queries else "n/a"
+    busiest = f"{sum(concentration) / len(concentration):.0%}" if concentration else "n/a"
+
+    print(
+        f"{policy:<26} {metrics['achieved_rate_per_second']['median']:>8.1f}/s "
+        f"{metrics['ttft_from_intended_p50_us']['median'] / 1000:>8.1f}ms "
+        f"{p99['median'] / 1000:>8.1f}ms {interval:>22} {hit_rate:>9} {busiest:>8}"
+    )
+
+print()
+print(f"{runs} run(s) per policy. 'busiest' is the share of requests the busiest")
+print("worker took; a third is even across three workers.")
 PY

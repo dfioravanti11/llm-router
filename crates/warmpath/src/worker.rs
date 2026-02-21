@@ -1,9 +1,12 @@
-//! Worker pool: identity, load, the block index, and the routing decision.
+//! Worker pool: identity, load, health, the block index, and the routing
+//! decision.
 //!
-//! Health checking with ejection and a single retry lands in R0.4, alongside
-//! the load signals. What is here now is the router's own in-flight count,
-//! which R0.4 replaces with the worker's reported queue depth and KV
-//! utilization. Circuit breaking and drain are Appendix A1.
+//! Load comes from the workers themselves, polled from their metrics
+//! endpoints, rather than from the router's own in-flight count. The router's
+//! count cannot see work the engine has queued internally and cannot see memory
+//! pressure at all.
+//!
+//! Circuit breaking, drain, and hedging are Appendix A1.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -11,10 +14,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use warmpath_core::PromptFingerprint;
 
-use crate::config::{AffinityConfig, Config, Policy, WorkerConfig};
+use crate::config::{AffinityConfig, Config, HealthConfig, Policy, WorkerConfig};
 use crate::index::{ApproximateIndex, BlockIndex, IndexStats, Reservation, MAX_WORKERS};
 use crate::metrics::{Metrics, WorkerMetrics};
-use crate::policy::{self, Decision, RoutingInputs};
+use crate::policy::{self, Decision, DecisionReason, RoutingInputs};
+use crate::session::SessionAffinity;
+use crate::state::{WorkerSnapshot, WorkerState};
 
 #[derive(Debug, Clone)]
 pub struct Worker {
@@ -58,8 +63,14 @@ pub struct WorkerPool {
     workers: Vec<Worker>,
     /// Metric handles, indexed in step with `workers`.
     worker_metrics: Vec<WorkerMetrics>,
-    /// Requests dispatched and not yet finished, per worker.
+    /// Requests dispatched and not yet finished, per worker. Kept as a
+    /// fallback for the moment before the first poll returns, when the worker's
+    /// own numbers are not available yet.
     in_flight: Vec<AtomicUsize>,
+    /// What each worker last reported about itself.
+    states: Vec<Arc<WorkerState>>,
+    sessions: SessionAffinity,
+    health: HealthConfig,
     client: reqwest::Client,
     policy: Policy,
     affinity: AffinityConfig,
@@ -91,6 +102,12 @@ impl WorkerPool {
 
         Ok(Self {
             in_flight: workers.iter().map(|_| AtomicUsize::new(0)).collect(),
+            states: workers
+                .iter()
+                .map(|_| Arc::new(WorkerState::default()))
+                .collect(),
+            sessions: SessionAffinity::new(config.routing.session_capacity),
+            health: config.health.clone(),
             index: Arc::new(ApproximateIndex::new(
                 workers.len(),
                 config.index.block_budget,
@@ -104,40 +121,98 @@ impl WorkerPool {
         })
     }
 
+    /// Start polling every worker's metrics endpoint.
+    ///
+    /// Spawned once at startup. Until the first poll returns, the router falls
+    /// back to its own in-flight counts, so a cold start routes on something
+    /// rather than on zeros.
+    pub fn spawn_pollers(self: &Arc<Self>) {
+        let endpoints: Vec<String> = self
+            .workers
+            .iter()
+            .map(|worker| worker.endpoint(&self.health.metrics_path))
+            .collect();
+
+        tokio::spawn(crate::state::poll_workers(
+            self.client.clone(),
+            endpoints,
+            self.states.clone(),
+            self.health.clone(),
+        ));
+    }
+
     /// Route one request.
     ///
     /// `fingerprint` is `None` when the policy does not read the index, or when
     /// the request body could not be understood. Either way the affinity
     /// policies degrade to routing on load, because no correctness invariant
     /// may depend on the index having an answer.
-    pub fn pick(&self, fingerprint: Option<&PromptFingerprint>) -> Choice {
+    pub fn pick(&self, fingerprint: Option<&PromptFingerprint>, session: Option<&str>) -> Choice {
         let worker_count = self.workers.len();
 
         // Stack-allocated, so routing does not allocate. `MAX_WORKERS` is the
         // fleet size the bitset in the index already caps at.
         let mut matched = [0usize; MAX_WORKERS];
         let mut load = [0usize; MAX_WORKERS];
+        let mut kv = [0.0f64; MAX_WORKERS];
+        let mut healthy = [true; MAX_WORKERS];
 
         let blocks = fingerprint.map(|f| f.blocks.as_slice()).unwrap_or(&[]);
         if !blocks.is_empty() {
             self.index
                 .match_prefix(blocks, &mut matched[..worker_count]);
         }
-        for (worker, slot) in load[..worker_count].iter_mut().enumerate() {
-            *slot = self.in_flight[worker].load(Ordering::Relaxed);
+        for worker in 0..worker_count {
+            let state = &self.states[worker];
+            let reported = state.queue_depth();
+            // Before the first successful poll a worker reports nothing, so the
+            // router's own count stands in. After that the worker's view wins,
+            // because it can see queueing the router cannot.
+            load[worker] = if reported > 0 {
+                reported
+            } else {
+                self.in_flight[worker].load(Ordering::Relaxed)
+            };
+            kv[worker] = state.kv_utilization();
+            healthy[worker] = state.is_healthy();
         }
 
         let cursor = self.cursor.fetch_add(1, Ordering::Relaxed);
-        let decision = policy::choose(
-            self.policy,
-            &self.affinity,
-            RoutingInputs {
-                prompt_blocks: blocks.len(),
-                matched: &matched[..worker_count],
-                load: &load[..worker_count],
-            },
-            cursor,
-        );
+        let inputs = RoutingInputs {
+            prompt_blocks: blocks.len(),
+            matched: &matched[..worker_count],
+            load: &load[..worker_count],
+            kv_utilization: &kv[..worker_count],
+            healthy: &healthy[..worker_count],
+        };
+        let mut decision = policy::choose(self.policy, &self.affinity, inputs, cursor);
+
+        // Session affinity sits on top of the policy rather than inside it, so
+        // it composes with every policy and yields to the same overrides
+        // affinity does. A session pinned to a worker that is failing, or that
+        // the balance override just moved traffic away from, is not worth
+        // honouring.
+        if let Some(session) = session.filter(|id| !id.is_empty()) {
+            let overridden = matches!(
+                decision.reason,
+                DecisionReason::BalanceOverride | DecisionReason::NoHealthyWorker
+            );
+            if let Some(pinned) = self.sessions.get(session) {
+                if pinned < worker_count && healthy[pinned] && !overridden {
+                    decision = Decision {
+                        worker: pinned,
+                        reason: DecisionReason::Session,
+                        matched_blocks: matched[pinned],
+                        match_ratio: if blocks.is_empty() {
+                            0.0
+                        } else {
+                            matched[pinned] as f64 / blocks.len() as f64
+                        },
+                    };
+                }
+            }
+            self.sessions.remember(session, decision.worker);
+        }
 
         self.in_flight[decision.worker].fetch_add(1, Ordering::Relaxed);
 
@@ -197,6 +272,51 @@ impl WorkerPool {
     pub fn in_flight(&self, worker: usize) -> usize {
         self.in_flight[worker].load(Ordering::Relaxed)
     }
+
+    /// What every worker last reported about itself.
+    pub fn worker_snapshots(&self) -> Vec<WorkerSnapshot> {
+        self.states.iter().map(|state| state.snapshot()).collect()
+    }
+
+    /// Whether a failed dispatch should be retried on another worker.
+    pub fn retry_enabled(&self) -> bool {
+        self.health.retry_on_dispatch_failure
+    }
+
+    /// A worker other than `avoid`, for retrying a request that never left the
+    /// router. Returns `None` when there is nowhere else to send it.
+    pub fn pick_alternative(&self, avoid: usize) -> Option<Choice> {
+        if self.workers.len() < 2 {
+            return None;
+        }
+
+        let mut best: Option<(usize, usize)> = None;
+        for worker in 0..self.workers.len() {
+            if worker == avoid || !self.states[worker].is_healthy() {
+                continue;
+            }
+            let load = self.in_flight[worker].load(Ordering::Relaxed);
+            if best.is_none_or(|(_, lowest)| load < lowest) {
+                best = Some((worker, load));
+            }
+        }
+
+        let (worker, _) = best?;
+        self.in_flight[worker].fetch_add(1, Ordering::Relaxed);
+        Some(Choice {
+            index: worker,
+            decision: Decision {
+                worker,
+                reason: DecisionReason::Retry,
+                matched_blocks: 0,
+                match_ratio: 0.0,
+            },
+            metrics: self.worker_metrics[worker].clone(),
+            // No reservation: the retry's blocks belong to whichever worker
+            // ends up serving it, and that is recorded when it completes.
+            reservation: None,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -212,10 +332,11 @@ mod tests {
             upstream: UpstreamConfig::default(),
             routing: RoutingConfig {
                 policy,
-                affinity: AffinityConfig::default(),
+                ..RoutingConfig::default()
             },
             index: IndexConfig::default(),
             model: ModelConfig::default(),
+            health: HealthConfig::default(),
             workers: (0..worker_count)
                 .map(|index| WorkerConfig {
                     name: format!("w{index}"),
@@ -265,7 +386,7 @@ mod tests {
     fn first_policy_pins_every_request_to_one_worker() {
         let pool = pool(Policy::First, 3);
         for _ in 0..10 {
-            let choice = pool.pick(None);
+            let choice = pool.pick(None, None);
             assert_eq!(choice.index, 0);
             pool.finish(choice.index);
         }
@@ -276,7 +397,7 @@ mod tests {
         let pool = pool(Policy::RoundRobin, 3);
         let picked: Vec<usize> = (0..7)
             .map(|_| {
-                let choice = pool.pick(None);
+                let choice = pool.pick(None, None);
                 pool.finish(choice.index);
                 choice.index
             })
@@ -288,7 +409,7 @@ mod tests {
     #[test]
     fn a_baseline_policy_takes_no_reservation() {
         let pool = pool(Policy::RoundRobin, 2);
-        let choice = pool.pick(Some(&fingerprint(1, 8)));
+        let choice = pool.pick(Some(&fingerprint(1, 8)), None);
 
         assert!(choice.reservation.is_some(), "the chain is still recorded");
         assert_eq!(choice.decision.reason, DecisionReason::RoundRobin);
@@ -298,8 +419,8 @@ mod tests {
     fn in_flight_rises_on_dispatch_and_falls_on_finish() {
         let pool = pool(Policy::First, 2);
 
-        let first = pool.pick(None);
-        let second = pool.pick(None);
+        let first = pool.pick(None, None);
+        let second = pool.pick(None, None);
         assert_eq!(pool.in_flight(0), 2);
 
         pool.finish(first.index);
@@ -324,7 +445,7 @@ mod tests {
 
         // First request has nothing to go on, so it lands somewhere and
         // commits its blocks when it finishes.
-        let first = pool.pick(Some(&prompt));
+        let first = pool.pick(Some(&prompt), None);
         let mut reservation = first.reservation.expect("should reserve");
         reservation.confirm();
         drop(reservation);
@@ -332,7 +453,7 @@ mod tests {
 
         // Every later request with the same prefix follows it.
         for _ in 0..10 {
-            let repeat = pool.pick(Some(&prompt));
+            let repeat = pool.pick(Some(&prompt), None);
             assert_eq!(repeat.index, first.index);
             assert_eq!(repeat.decision.reason, DecisionReason::Affinity);
             assert_eq!(repeat.decision.matched_blocks, 16);
@@ -347,8 +468,8 @@ mod tests {
         let prompt = fingerprint(7, 16);
 
         // Nothing has completed, so the index has no committed blocks at all.
-        let first = pool.pick(Some(&prompt));
-        let second = pool.pick(Some(&prompt));
+        let first = pool.pick(Some(&prompt), None);
+        let second = pool.pick(Some(&prompt), None);
 
         assert_eq!(
             second.index, first.index,
@@ -362,7 +483,7 @@ mod tests {
         let pool = pool(Policy::PrefixAffinity, 3);
         let prompt = fingerprint(9, 16);
 
-        let cancelled = pool.pick(Some(&prompt));
+        let cancelled = pool.pick(Some(&prompt), None);
         drop(cancelled.reservation);
         pool.finish(cancelled.index);
 
@@ -376,7 +497,7 @@ mod tests {
 
         let mut seen = std::collections::HashSet::new();
         for seed in 0..9 {
-            let choice = pool.pick(Some(&fingerprint(seed, 16)));
+            let choice = pool.pick(Some(&fingerprint(seed, 16)), None);
             let mut reservation = choice.reservation.expect("should reserve");
             reservation.confirm();
             drop(reservation);
@@ -396,7 +517,7 @@ mod tests {
         let prompt = fingerprint(3, 16);
 
         // Teach the index that worker 0 holds the prefix.
-        let first = pool.pick(Some(&prompt));
+        let first = pool.pick(Some(&prompt), None);
         let mut reservation = first.reservation.expect("should reserve");
         reservation.confirm();
         drop(reservation);
@@ -408,14 +529,14 @@ mod tests {
         // the imbalance is what stops it.
         let mut held = Vec::new();
         while pool.in_flight(holder) <= pool.affinity.balance_abs_threshold {
-            held.push(pool.pick(Some(&prompt)));
+            held.push(pool.pick(Some(&prompt), None));
             assert!(
                 held.len() < 100,
                 "affinity stopped piling onto the holder before the threshold"
             );
         }
 
-        let decision = pool.pick(Some(&prompt));
+        let decision = pool.pick(Some(&prompt), None);
         assert_eq!(decision.decision.reason, DecisionReason::BalanceOverride);
         assert_ne!(decision.index, holder);
     }

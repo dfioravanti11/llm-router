@@ -12,7 +12,8 @@ use futures_util::StreamExt;
 use serde_json::json;
 use tokio::net::TcpListener;
 use warmpath::config::{
-    Config, IndexConfig, ModelConfig, RoutingConfig, ServerConfig, UpstreamConfig, WorkerConfig,
+    Config, HealthConfig, IndexConfig, ModelConfig, RoutingConfig, ServerConfig, UpstreamConfig,
+    WorkerConfig,
 };
 use warmpath_mock::{MockConfig, MockState};
 
@@ -42,6 +43,7 @@ async fn spawn_router(worker: SocketAddr) -> SocketAddr {
         routing: RoutingConfig::default(),
         index: IndexConfig::default(),
         model: ModelConfig::default(),
+        health: HealthConfig::default(),
         workers: vec![WorkerConfig {
             name: "w0".to_string(),
             url: format!("http://{worker}"),
@@ -305,6 +307,7 @@ async fn oversized_requests_are_rejected_before_dispatch() {
         routing: RoutingConfig::default(),
         index: IndexConfig::default(),
         model: ModelConfig::default(),
+        health: HealthConfig::default(),
         workers: vec![WorkerConfig {
             name: "w0".to_string(),
             url: format!("http://{worker}"),

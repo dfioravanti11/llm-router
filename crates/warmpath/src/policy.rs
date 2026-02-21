@@ -18,12 +18,22 @@ pub struct RoutingInputs<'a> {
     pub prompt_blocks: usize,
     /// Leading blocks each worker is believed to hold.
     pub matched: &'a [usize],
-    /// Requests already dispatched to each worker and not yet finished.
+    /// Each worker's queue depth, as the worker reports it: requests it has
+    /// admitted and not finished, running and waiting together.
     ///
-    /// R0.3 uses the router's own in-flight count. R0.4 replaces it with the
-    /// worker's reported queue depth and KV utilization, which is the signal
-    /// that actually reflects the engine rather than the proxy.
+    /// This is the worker's own view rather than the router's in-flight count,
+    /// so it includes work the engine has queued internally and survives the
+    /// router restarting.
     pub load: &'a [usize],
+    /// Fraction of each worker's KV cache in use, between zero and one.
+    ///
+    /// Queue depth alone cannot express memory pressure. A worker holding a
+    /// request's whole prefix but with no KV headroom should be able to lose to
+    /// one with room, and this is the number that lets it.
+    pub kv_utilization: &'a [f64],
+    /// Whether each worker is currently answering. Unhealthy workers are never
+    /// chosen unless every worker is unhealthy.
+    pub healthy: &'a [bool],
 }
 
 /// Why a request went where it went.
@@ -46,6 +56,17 @@ pub enum DecisionReason {
     /// No worker held enough of the prefix to be worth preferring, so load
     /// decided.
     CacheMiss,
+    /// Fewest requests queued at the worker.
+    LeastLoaded,
+    /// The less loaded of two candidates.
+    PowerOfTwo,
+    /// The session's usual worker was reused.
+    Session,
+    /// A second attempt, after the first worker never answered.
+    Retry,
+    /// Every worker was failing health checks, so one was chosen anyway. A
+    /// request refused is worse than a request sent somewhere doubtful.
+    NoHealthyWorker,
 }
 
 impl DecisionReason {
@@ -56,6 +77,11 @@ impl DecisionReason {
             DecisionReason::Affinity => "affinity",
             DecisionReason::BalanceOverride => "balance-override",
             DecisionReason::CacheMiss => "cache-miss",
+            DecisionReason::LeastLoaded => "least-loaded",
+            DecisionReason::PowerOfTwo => "power-of-two",
+            DecisionReason::Session => "session",
+            DecisionReason::Retry => "retry",
+            DecisionReason::NoHealthyWorker => "no-healthy-worker",
         }
     }
 }
@@ -85,18 +111,86 @@ pub fn choose(
     debug_assert!(worker_count > 0, "there is always at least one worker");
     debug_assert_eq!(inputs.matched.len(), worker_count);
 
+    // A fleet with nothing healthy still has to serve traffic. Refusing would
+    // turn a monitoring blip into an outage, and the health signal is a poll
+    // result rather than a certainty.
+    if !inputs.healthy.iter().any(|healthy| *healthy) {
+        return decide(
+            cursor % worker_count,
+            DecisionReason::NoHealthyWorker,
+            inputs,
+        );
+    }
+
     match policy {
-        Policy::First => decide(0, DecisionReason::First, inputs),
-        Policy::RoundRobin => decide(cursor % worker_count, DecisionReason::RoundRobin, inputs),
+        Policy::First => decide(first_healthy(inputs), DecisionReason::First, inputs),
+        Policy::RoundRobin => decide(
+            round_robin(inputs, cursor),
+            DecisionReason::RoundRobin,
+            inputs,
+        ),
+        Policy::LeastLoaded => decide(
+            least_loaded(inputs, cursor),
+            DecisionReason::LeastLoaded,
+            inputs,
+        ),
+        Policy::PowerOfTwo => decide(
+            power_of_two(inputs, cursor),
+            DecisionReason::PowerOfTwo,
+            inputs,
+        ),
         Policy::PrefixAffinity => prefix_affinity(config, inputs, cursor),
         Policy::PrefixAffinityBalanced => balanced(config, inputs, cursor),
     }
 }
 
+/// The lowest-numbered healthy worker.
+fn first_healthy(inputs: RoutingInputs<'_>) -> usize {
+    (0..inputs.load.len())
+        .find(|worker| inputs.healthy[*worker])
+        .unwrap_or(0)
+}
+
+/// Even rotation, skipping workers that are not answering.
+fn round_robin(inputs: RoutingInputs<'_>, cursor: usize) -> usize {
+    let worker_count = inputs.load.len();
+    (0..worker_count)
+        .map(|offset| (cursor + offset) % worker_count)
+        .find(|worker| inputs.healthy[*worker])
+        .unwrap_or(cursor % worker_count)
+}
+
+/// Two candidates, the less loaded one wins.
+///
+/// Scanning the whole fleet is cheap at this size, so speed is not the reason
+/// this exists. It is that power-of-two-choices is what a reader expects in the
+/// baseline field, and omitting it would make the comparison look like it
+/// avoided a strong baseline.
+fn power_of_two(inputs: RoutingInputs<'_>, cursor: usize) -> usize {
+    let worker_count = inputs.load.len();
+    if worker_count == 1 {
+        return 0;
+    }
+
+    // Both candidates come from the cursor rather than a random source, so a
+    // run reproduces exactly.
+    let first = cursor % worker_count;
+    let mut second = (cursor / worker_count + 1) % worker_count;
+    if second == first {
+        second = (first + 1) % worker_count;
+    }
+
+    [first, second]
+        .into_iter()
+        .filter(|worker| inputs.healthy[*worker])
+        .min_by_key(|worker| inputs.load[*worker])
+        .unwrap_or_else(|| round_robin(inputs, cursor))
+}
+
 /// Longest match wins, and nothing else gets a vote.
 ///
 /// This is the naive policy on purpose. It is the one that hotspots when a
-/// prefix gets hot, and R0.4 exists to find a workload where it loses to the
+/// prefix gets hot, and the skewed workload exists to show it losing to the
 /// balanced variant. Keeping it honest, rather than quietly adding a little
 /// load-awareness, is what makes that comparison mean anything.
 fn prefix_affinity(config: &AffinityConfig, inputs: RoutingInputs<'_>, cursor: usize) -> Decision {
@@ -115,8 +209,16 @@ fn prefix_affinity(config: &AffinityConfig, inputs: RoutingInputs<'_>, cursor: u
 
 /// Affinity, until affinity would hurt more than it helps.
 fn balanced(config: &AffinityConfig, inputs: RoutingInputs<'_>, cursor: usize) -> Decision {
-    let max_load = inputs.load.iter().copied().max().unwrap_or(0);
-    let min_load = inputs.load.iter().copied().min().unwrap_or(0);
+    let healthy_loads = || {
+        inputs
+            .load
+            .iter()
+            .enumerate()
+            .filter(|(worker, _)| inputs.healthy[*worker])
+            .map(|(_, load)| *load)
+    };
+    let max_load = healthy_loads().max().unwrap_or(0);
+    let min_load = healthy_loads().min().unwrap_or(0);
 
     // An imbalanced fleet is a routing emergency: cache locality is worth
     // nothing if the worker holding the prefix is the one that cannot keep up.
@@ -144,9 +246,12 @@ fn balanced(config: &AffinityConfig, inputs: RoutingInputs<'_>, cursor: usize) -
 
     // Score every worker on cache locality and headroom together, so a big
     // match on a busy worker can still lose to a smaller match on an idle one.
-    let mut chosen = 0;
+    let mut chosen = first_healthy(inputs);
     let mut best_score = f64::NEG_INFINITY;
     for worker in 0..inputs.load.len() {
+        if !inputs.healthy[worker] {
+            continue;
+        }
         let score = affinity_score(config, inputs, worker, max_load);
         if score > best_score {
             best_score = score;
@@ -169,10 +274,15 @@ fn affinity_score(
     max_load: usize,
 ) -> f64 {
     let ratio = match_ratio(inputs, worker);
-    // Headroom is relative to the busiest worker, so the scale adapts to the
-    // fleet instead of needing an absolute capacity the router does not know.
-    // R0.4 replaces this with real KV utilization.
-    let headroom = 1.0 - (inputs.load[worker] as f64 / (max_load as f64 + 1.0));
+
+    // Queue headroom is relative to the busiest worker, so the scale adapts to
+    // the fleet instead of needing an absolute capacity the router cannot know.
+    let queue_headroom = 1.0 - (inputs.load[worker] as f64 / (max_load as f64 + 1.0));
+    // Memory headroom is absolute, because the worker reports utilization as a
+    // fraction of its own capacity. A worker at 95% KV has almost no room for
+    // another sequence however short its queue happens to look.
+    let memory_headroom = 1.0 - inputs.kv_utilization[worker].clamp(0.0, 1.0);
+    let headroom = queue_headroom.min(memory_headroom);
 
     (1.0 - config.load_weight) * ratio + config.load_weight * headroom
 }
@@ -185,10 +295,15 @@ struct BestMatch {
 /// The worker holding the most of this prompt's prefix, ties going to the
 /// less loaded one and then to the cursor.
 fn best_match(inputs: RoutingInputs<'_>) -> BestMatch {
-    let mut worker = 0;
-    let mut matched = 0;
+    let mut worker = (0..inputs.load.len())
+        .find(|worker| inputs.healthy[*worker])
+        .unwrap_or(0);
+    let mut matched = inputs.matched[worker];
 
     for candidate in 0..inputs.matched.len() {
+        if !inputs.healthy[candidate] {
+            continue;
+        }
         let blocks = inputs.matched[candidate];
         let better =
             blocks > matched || (blocks == matched && inputs.load[candidate] < inputs.load[worker]);
@@ -215,15 +330,16 @@ fn is_worth_preferring(config: &AffinityConfig, inputs: RoutingInputs<'_>, match
 }
 
 /// Least loaded, ties going to the cursor so the choice rotates instead of
-/// always landing on the lowest index.
+/// always landing on the lowest index. Unhealthy workers are skipped.
 fn least_loaded(inputs: RoutingInputs<'_>, cursor: usize) -> usize {
     let worker_count = inputs.load.len();
-    let mut chosen = cursor % worker_count;
+    let start = round_robin(inputs, cursor);
+    let mut chosen = start;
     let mut lowest = inputs.load[chosen];
 
     for offset in 1..worker_count {
         let candidate = (cursor + offset) % worker_count;
-        if inputs.load[candidate] < lowest {
+        if inputs.healthy[candidate] && inputs.load[candidate] < lowest {
             lowest = inputs.load[candidate];
             chosen = candidate;
         }
@@ -261,6 +377,11 @@ mod tests {
         }
     }
 
+    /// Every worker healthy and no memory pressure, which is the condition
+    /// most of these tests want to hold constant while varying one thing.
+    const IDLE_KV: [f64; 8] = [0.0; 8];
+    const ALL_HEALTHY: [bool; 8] = [true; 8];
+
     fn inputs<'a>(
         prompt_blocks: usize,
         matched: &'a [usize],
@@ -270,6 +391,8 @@ mod tests {
             prompt_blocks,
             matched,
             load,
+            kv_utilization: &IDLE_KV[..load.len()],
+            healthy: &ALL_HEALTHY[..load.len()],
         }
     }
 
@@ -497,6 +620,8 @@ mod tests {
         for policy in [
             Policy::First,
             Policy::RoundRobin,
+            Policy::LeastLoaded,
+            Policy::PowerOfTwo,
             Policy::PrefixAffinity,
             Policy::PrefixAffinityBalanced,
         ] {
@@ -508,10 +633,171 @@ mod tests {
         }
     }
 
+    fn inputs_with<'a>(
+        prompt_blocks: usize,
+        matched: &'a [usize],
+        load: &'a [usize],
+        kv_utilization: &'a [f64],
+        healthy: &'a [bool],
+    ) -> RoutingInputs<'a> {
+        RoutingInputs {
+            prompt_blocks,
+            matched,
+            load,
+            kv_utilization,
+            healthy,
+        }
+    }
+
+    #[test]
+    fn least_loaded_picks_the_shortest_queue() {
+        let decision = choose(
+            Policy::LeastLoaded,
+            &config(),
+            inputs(10, &[10, 0, 0], &[5, 9, 1]),
+            0,
+        );
+
+        assert_eq!(decision.worker, 2);
+        assert_eq!(decision.reason, DecisionReason::LeastLoaded);
+    }
+
+    #[test]
+    fn power_of_two_picks_the_lighter_of_its_two_candidates() {
+        // Whichever pair the cursor selects, the chosen worker is never the
+        // most loaded one, which is the property the policy promises.
+        for cursor in 0..12 {
+            let decision = choose(
+                Policy::PowerOfTwo,
+                &config(),
+                inputs(10, &[0, 0, 0, 0], &[1, 9, 2, 3]),
+                cursor,
+            );
+            assert_ne!(decision.worker, 1, "cursor {cursor} chose the busiest");
+            assert_eq!(decision.reason, DecisionReason::PowerOfTwo);
+        }
+    }
+
+    #[test]
+    fn power_of_two_spreads_across_the_fleet() {
+        let chosen: std::collections::HashSet<usize> = (0..24)
+            .map(|cursor| {
+                choose(
+                    Policy::PowerOfTwo,
+                    &config(),
+                    inputs(10, &[0, 0, 0, 0], &[0, 0, 0, 0]),
+                    cursor,
+                )
+                .worker
+            })
+            .collect();
+
+        assert!(chosen.len() > 1, "every request went to the same worker");
+    }
+
+    #[test]
+    fn an_unhealthy_worker_is_never_chosen() {
+        let healthy = [true, false, true];
+        let kv = [0.0, 0.0, 0.0];
+
+        for policy in [
+            Policy::First,
+            Policy::RoundRobin,
+            Policy::LeastLoaded,
+            Policy::PowerOfTwo,
+            Policy::PrefixAffinity,
+            Policy::PrefixAffinityBalanced,
+        ] {
+            for cursor in 0..6 {
+                // Worker 1 holds the whole prefix and has the shortest queue,
+                // so every policy would want it if it were answering.
+                let decision = choose(
+                    policy,
+                    &config(),
+                    inputs_with(10, &[0, 10, 0], &[4, 0, 4], &kv, &healthy),
+                    cursor,
+                );
+                assert_ne!(
+                    decision.worker, 1,
+                    "{policy:?} routed to an ejected worker at cursor {cursor}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_fleet_with_nothing_healthy_still_serves_somewhere() {
+        // Refusing would turn a monitoring blip into an outage. The reason is
+        // recorded so the decision is visible rather than silent.
+        let healthy = [false, false];
+        let kv = [0.0, 0.0];
+
+        let decision = choose(
+            Policy::PrefixAffinityBalanced,
+            &config(),
+            inputs_with(10, &[0, 10], &[0, 0], &kv, &healthy),
+            1,
+        );
+
+        assert_eq!(decision.reason, DecisionReason::NoHealthyWorker);
+        assert!(decision.worker < 2);
+    }
+
+    #[test]
+    fn a_worker_out_of_kv_headroom_loses_despite_holding_the_prefix() {
+        // Both queues are empty, so queue depth cannot decide this and the only
+        // thing separating the two workers is memory pressure. That is the
+        // signal queue depth alone could never express, and the reason worker
+        // state is polled at all.
+        let heavy = AffinityConfig {
+            load_weight: 0.6,
+            ..config()
+        };
+        let kv = [0.05, 0.98];
+        let healthy = [true, true];
+
+        let decision = choose(
+            Policy::PrefixAffinityBalanced,
+            &heavy,
+            inputs_with(10, &[4, 10], &[0, 0], &kv, &healthy),
+            0,
+        );
+
+        assert_eq!(
+            decision.worker, 0,
+            "the worker at 98% KV should have lost the tie"
+        );
+    }
+
+    #[test]
+    fn kv_headroom_does_not_override_a_healthy_match() {
+        // The same fleet with room to spare picks the longer match.
+        let kv = [0.05, 0.10];
+        let healthy = [true, true];
+
+        let decision = choose(
+            Policy::PrefixAffinityBalanced,
+            &config(),
+            inputs_with(10, &[4, 10], &[0, 0], &kv, &healthy),
+            0,
+        );
+
+        assert_eq!(decision.worker, 1);
+        assert_eq!(decision.reason, DecisionReason::Affinity);
+    }
+
     #[test]
     fn reason_labels_are_stable() {
         assert_eq!(DecisionReason::Affinity.as_str(), "affinity");
         assert_eq!(DecisionReason::BalanceOverride.as_str(), "balance-override");
         assert_eq!(DecisionReason::CacheMiss.as_str(), "cache-miss");
+        assert_eq!(DecisionReason::LeastLoaded.as_str(), "least-loaded");
+        assert_eq!(DecisionReason::PowerOfTwo.as_str(), "power-of-two");
+        assert_eq!(DecisionReason::Session.as_str(), "session");
+        assert_eq!(DecisionReason::Retry.as_str(), "retry");
+        assert_eq!(
+            DecisionReason::NoHealthyWorker.as_str(),
+            "no-healthy-worker"
+        );
     }
 }

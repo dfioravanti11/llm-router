@@ -62,7 +62,7 @@ pub fn build_bodies(config: &RunConfig, count: usize) -> Vec<Bytes> {
             let messages = if prefixes.is_empty() {
                 json!([{ "role": "user", "content": question }])
             } else {
-                let choice = (rng.next_u64() % prefixes.len() as u64) as usize;
+                let choice = pick_prefix(&mut rng, prefixes.len(), config.hot_prefix_share);
                 json!([
                     { "role": "system", "content": prefixes[choice] },
                     { "role": "user", "content": question },
@@ -78,6 +78,24 @@ pub fn build_bodies(config: &RunConfig, count: usize) -> Vec<Bytes> {
             Bytes::from(serde_json::to_vec(&payload).expect("request payload should serialize"))
         })
         .collect()
+}
+
+/// Which prefix a request uses.
+///
+/// With no skew every prefix is equally likely. With skew, that share of
+/// requests take prefix zero and the rest spread over the others, which
+/// concentrates cache value on one worker and is what makes a purely
+/// cache-seeking policy hotspot.
+fn pick_prefix(rng: &mut Rng, pool: usize, hot_share: f64) -> usize {
+    if pool <= 1 || hot_share <= 0.0 {
+        return (rng.next_u64() % pool.max(1) as u64) as usize;
+    }
+    if rng.next_f64() < hot_share.min(1.0) {
+        return 0;
+    }
+    // The cold tail excludes the hot prefix, so the requested share is the
+    // share actually delivered.
+    1 + (rng.next_u64() % (pool - 1) as u64) as usize
 }
 
 /// `count` words drawn from the vocabulary.
@@ -129,6 +147,8 @@ mod tests {
             prompt_words: 12,
             shared_prefix_words: 0,
             prefix_pool: 0,
+            hot_prefix_share: 0.0,
+            session_turns: 0,
             max_tokens: 8,
             stream: true,
             max_dispatch_lag_ms: 10.0,
@@ -170,6 +190,61 @@ mod tests {
             2,
             "forty requests should have drawn from a pool of exactly two prefixes"
         );
+    }
+
+    /// The share asked for is the share delivered, which matters because the
+    /// skew number ends up in a published table.
+    #[test]
+    fn the_hot_prefix_takes_the_share_it_was_given() {
+        let mut config = config(9);
+        config.shared_prefix_words = 32;
+        config.prefix_pool = 10;
+        config.hot_prefix_share = 0.8;
+
+        let bodies = build_bodies(&config, 4_000);
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for body in &bodies {
+            let parsed: serde_json::Value = serde_json::from_slice(body).expect("valid JSON");
+            let prefix = parsed["messages"][0]["content"]
+                .as_str()
+                .expect("prefix")
+                .to_string();
+            *counts.entry(prefix).or_default() += 1;
+        }
+
+        let hottest = *counts.values().max().expect("a hottest prefix");
+        let share = hottest as f64 / bodies.len() as f64;
+        assert!(
+            (share - 0.8).abs() < 0.03,
+            "the hot prefix took {share:.3} of requests, not 0.8"
+        );
+        assert_eq!(counts.len(), 10, "the cold tail should still be used");
+    }
+
+    #[test]
+    fn without_skew_the_pool_is_used_evenly() {
+        let mut config = config(9);
+        config.shared_prefix_words = 32;
+        config.prefix_pool = 4;
+
+        let bodies = build_bodies(&config, 4_000);
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for body in &bodies {
+            let parsed: serde_json::Value = serde_json::from_slice(body).expect("valid JSON");
+            *counts
+                .entry(
+                    parsed["messages"][0]["content"]
+                        .as_str()
+                        .expect("prefix")
+                        .to_string(),
+                )
+                .or_default() += 1;
+        }
+
+        for count in counts.values() {
+            let share = *count as f64 / bodies.len() as f64;
+            assert!((share - 0.25).abs() < 0.03, "uneven share {share:.3}");
+        }
     }
 
     #[test]

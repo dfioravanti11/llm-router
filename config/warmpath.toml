@@ -1,7 +1,6 @@
 # Warmpath router configuration.
 #
-# Matches the R0.3 surface. Index backend selection, hedging, and health
-# checking get their own sections as the releases that read them land.
+# Matches the R0.4 surface.
 
 [server]
 bind = "0.0.0.0:8080"
@@ -16,12 +15,22 @@ connect_timeout_ms = 2000
 read_timeout_ms = 60000
 
 [routing]
-# `round-robin` rotates evenly and ignores cache state; it is the baseline every
-# later policy is measured against. `first` pins all traffic to one worker.
-# `prefix-affinity` sends a request to whichever worker already holds the most
-# of its prompt. `prefix-affinity-balanced` weighs that against load, and yields
-# entirely when the fleet is far enough out of balance.
+# Cache-blind baselines: `round-robin` rotates evenly, `least-loaded` picks the
+# shortest queue, `power-of-two` picks the lighter of two candidates, and
+# `first` pins everything to one worker.
+#
+# Cache-aware: `prefix-affinity` sends a request to whichever worker already
+# holds the most of its prompt, ignoring load entirely.
+# `prefix-affinity-balanced` weighs the match against queue depth and KV
+# pressure, and yields completely when the fleet tips out of balance.
+#
+# On skewed traffic the difference matters a great deal; see RESULTS.md.
 policy = "round-robin"
+
+# Sessions remembered so a multi-turn conversation returns to the worker holding
+# its history. Clients opt in with an `x-session-id` header. Bounded on purpose,
+# since the ids come from clients. Zero disables it.
+session_capacity = 100000
 
 [routing.affinity]
 # Smallest share of a prompt's blocks worth routing on. A trivial overlap should
@@ -43,6 +52,21 @@ block_size = 16
 # Blocks one worker is assumed to hold before the index models an eviction.
 # This is a guess about the engine's capacity, not a reading of it.
 block_budget = 65536
+
+[health]
+# Each worker's metrics endpoint is polled for queue depth, KV utilization, and
+# its own prefix cache counters. This is the router's only view of worker
+# pressure, so a long interval means routing on stale load.
+poll_interval_ms = 500
+metrics_path = "/metrics"
+# Consecutive failed polls before a worker stops receiving traffic, and
+# consecutive successes before it is used again. More than one either way, so a
+# single dropped packet does not eject a healthy worker.
+unhealthy_after = 3
+healthy_after = 2
+# Retry once on another worker when the first never answered. Only safe before
+# anything has streamed, which is why it covers connection failures alone.
+retry_on_dispatch_failure = true
 
 [model]
 # Directory holding tokenizer.json and tokenizer_config.json, from

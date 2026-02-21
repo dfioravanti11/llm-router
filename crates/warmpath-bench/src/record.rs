@@ -65,6 +65,22 @@ pub struct RunConfig {
     /// is what a fleet actually faces.
     #[serde(default)]
     pub prefix_pool: usize,
+    /// Share of requests that use the single hottest prefix, between zero and
+    /// one.
+    ///
+    /// Zero spreads requests evenly over the pool, which is what real traffic
+    /// never does. Real prefix popularity is heavily skewed: one system prompt
+    /// serves most of the traffic and the rest form a long tail. Skew is what
+    /// makes a policy that only maximises cache locality send most of the
+    /// fleet's work to one worker.
+    #[serde(default)]
+    pub hot_prefix_share: f64,
+    /// Turns per session. One means every request is independent.
+    ///
+    /// Later turns repeat the whole conversation so far, which is where
+    /// multi-turn prefix reuse comes from and what session affinity is for.
+    #[serde(default)]
+    pub session_turns: usize,
     pub max_tokens: usize,
     pub stream: bool,
     /// A run whose p99 dispatch lag exceeds this is marked invalid.
@@ -154,6 +170,8 @@ mod tests {
             prompt_words: 16,
             shared_prefix_words: 0,
             prefix_pool: 0,
+            hot_prefix_share: 0.0,
+            session_turns: 0,
             max_tokens: 8,
             stream: true,
             max_dispatch_lag_ms: 10.0,

@@ -4,6 +4,42 @@ Notable changes to this project, newest first. Update this alongside any commit 
 
 Format per entry: `## YYYY-MM-DD — short title`, then a few bullets of what changed and why (link to the relevant roadmap release from `project_status.md` when applicable).
 
+## 2026-02-21 — R0.4 load-aware and session-aware
+
+- The mock worker exposes `/metrics` using vLLM's own metric names, so the
+  router's poller and parser are exercised against the format they meet at R0.5
+  rather than a project-specific one.
+- The router polls every worker for queue depth, KV utilization, and its own
+  prefix cache counters. Load is now the worker's view rather than the router's
+  in-flight count, which cannot see work queued inside the engine and cannot see
+  memory pressure at all.
+- The balanced score combines match ratio with queue headroom and KV headroom,
+  taking whichever is tighter. A worker holding a whole prefix but out of memory
+  can now lose to one with room.
+- Health checking with ejection after repeated failed polls and re-admission
+  after repeated successes. A request whose worker never answered is retried
+  once elsewhere, which is safe only because nothing has streamed yet.
+- `least-loaded` and `power-of-two` cache-blind baselines, so the policy field
+  is fair.
+- Session affinity: clients set `x-session-id` and the conversation sticks to
+  one worker. Layered on top of any policy and yields to health and to the
+  balance override. The map is bounded, since the ids come from clients.
+- `warmpath-bench` gains a skew knob, so most requests can share one prefix as
+  real traffic does, and `scripts/policy-matrix.sh` runs every policy against
+  every workload shape.
+- Result: on skewed traffic naive affinity records the highest cache hit rate in
+  the field and a median 64 times worse than round-robin, with throughput
+  dropping below the offered rate, because it drives 80% of requests onto one
+  worker. The balanced policy holds throughput and keeps a better hit rate than
+  the cache-blind baselines. Hit rate is not the objective.
+- Two findings that do not flatter the router, published alongside the wins.
+  Round-robin wins the skewed workload outright, because heavy skew puts the hot
+  prefix in every worker's cache and leaves nothing to arrange. And
+  `least-loaded` posts a p99 nearly three times round-robin's on identical cache
+  behaviour, because a queue depth polled every 100ms is stale enough to herd.
+- `RESULTS.md` carries both workload matrices with confidence intervals, plus a
+  statement of the band in which cache-aware routing pays at all.
+
 ## 2026-02-15 — Real tokenizer and chat template
 
 - `warmpath-core` gains `HuggingFaceTokenizer` and `ModelFiles`, which load a

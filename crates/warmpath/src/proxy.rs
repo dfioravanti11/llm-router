@@ -28,6 +28,14 @@ use crate::AppState;
 pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-warmpath-request-id");
 /// Header naming the worker that served the request.
 pub const WORKER_HEADER: HeaderName = HeaderName::from_static("x-warmpath-worker");
+/// Header a client may set to keep a multi-turn conversation on one worker.
+///
+/// The OpenAI API has no session concept, so this is the router's own. It is a
+/// hint: the router honours it when it can and ignores it when the worker is
+/// failing or the fleet needs rebalancing.
+pub const SESSION_HEADER: HeaderName = HeaderName::from_static("x-session-id");
+/// Longest client-supplied session id accepted.
+const MAX_SESSION_ID: usize = 128;
 
 /// Longest client-supplied request id accepted before one is generated instead.
 const MAX_INBOUND_REQUEST_ID: usize = 128;
@@ -77,7 +85,8 @@ pub async fn proxy(
         .as_ref()
         .and_then(|builder| crate::prompt::fingerprint(builder, &body_bytes));
 
-    let choice = state.pool.pick(fingerprint.as_ref());
+    let session = read_session_id(&parts.headers);
+    let choice = state.pool.pick(fingerprint.as_ref(), session.as_deref());
     let worker = state.pool.worker(choice.index);
     let url = worker.endpoint(&path_and_query);
 
@@ -103,12 +112,15 @@ pub async fn proxy(
 
     let dispatched_at = Instant::now();
     choice.metrics.record_dispatch();
+    let mut choice = choice;
+    let mut worker = worker;
+
     let upstream = match state
         .pool
         .client()
         .request(parts.method.clone(), &url)
-        .headers(upstream_headers)
-        .body(body_bytes)
+        .headers(upstream_headers.clone())
+        .body(body_bytes.clone())
         .send()
         .await
     {
@@ -116,10 +128,55 @@ pub async fn proxy(
         Err(source) => {
             choice.metrics.record_failure();
             state.pool.finish(choice.index);
-            return Err(ProxyError::Upstream {
-                worker: worker.name.clone(),
-                source,
-            });
+
+            // Nothing has streamed, because the request never reached a worker.
+            // That is the only case where a retry is safe: once a byte has gone
+            // to the client, resending would duplicate it.
+            let Some(retry) = state
+                .pool
+                .retry_enabled()
+                .then(|| state.pool.pick_alternative(choice.index))
+                .flatten()
+            else {
+                return Err(ProxyError::Upstream {
+                    worker: worker.name.clone(),
+                    source,
+                });
+            };
+
+            let failed_worker = worker.name.clone();
+            choice = retry;
+            worker = state.pool.worker(choice.index);
+            let retry_url = worker.endpoint(&path_and_query);
+
+            tracing::warn!(
+                request_id = %request_id,
+                failed_worker = %failed_worker,
+                worker = %worker.name,
+                error = %source,
+                "worker did not answer; retrying once elsewhere"
+            );
+
+            choice.metrics.record_dispatch();
+            match state
+                .pool
+                .client()
+                .request(parts.method.clone(), &retry_url)
+                .headers(upstream_headers)
+                .body(body_bytes)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(source) => {
+                    choice.metrics.record_failure();
+                    state.pool.finish(choice.index);
+                    return Err(ProxyError::Upstream {
+                        worker: worker.name.clone(),
+                        source,
+                    });
+                }
+            }
         }
     };
 
@@ -189,6 +246,15 @@ pub async fn health() -> &'static str {
 /// are a model of the workers' caches rather than a reading of them.
 pub async fn index_stats(State(state): State<AppState>) -> Response {
     axum::Json(state.pool.index_stats()).into_response()
+}
+
+/// What each worker last told the router about itself.
+///
+/// Includes the worker's own prefix cache hit rate, which is the number the
+/// router does not control and therefore the one worth comparing its
+/// predictions against.
+pub async fn worker_stats(State(state): State<AppState>) -> Response {
+    axum::Json(state.pool.worker_snapshots()).into_response()
 }
 
 pub async fn metrics(State(state): State<AppState>) -> Response {
@@ -287,6 +353,21 @@ impl Drop for StreamGuard {
             );
         }
     }
+}
+
+/// A client-supplied session id, when it is one the router is willing to use as
+/// a map key.
+fn read_session_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(&SESSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_SESSION_ID
+                && value.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        .map(str::to_string)
 }
 
 fn resolve_request_id(headers: &HeaderMap, state: &AppState) -> String {

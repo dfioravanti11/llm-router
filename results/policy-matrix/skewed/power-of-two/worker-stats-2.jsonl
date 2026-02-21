@@ -1,0 +1,3 @@
+{"active":0,"queued":0,"available_slots":4,"started":716,"completed":716,"cancelled":0,"cache":{"prefix_cache_queries":12888,"prefix_cache_hits":9998,"cached_blocks":112,"evicted_blocks":2778}}
+{"active":0,"queued":0,"available_slots":4,"started":701,"completed":701,"cancelled":0,"cache":{"prefix_cache_queries":12618,"prefix_cache_hits":9536,"cached_blocks":112,"evicted_blocks":2970}}
+{"active":0,"queued":0,"available_slots":4,"started":727,"completed":727,"cancelled":0,"cache":{"prefix_cache_queries":13086,"prefix_cache_hits":10304,"cached_blocks":112,"evicted_blocks":2670}}

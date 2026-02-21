@@ -76,6 +76,15 @@ struct RunArgs {
     #[arg(long, default_value_t = 0)]
     prefix_pool: usize,
 
+    /// Share of requests using the single hottest prefix, between 0 and 1.
+    /// Zero spreads them evenly, which real traffic never does.
+    #[arg(long, default_value_t = 0.0)]
+    hot_prefix_share: f64,
+
+    /// Turns per session. One means every request is independent.
+    #[arg(long, default_value_t = 1)]
+    session_turns: usize,
+
     /// Label recorded with the run, naming the configuration under test.
     #[arg(long, default_value = "")]
     label: String,
@@ -142,6 +151,8 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
             prompt_words: args.prompt_words,
             shared_prefix_words: args.shared_prefix_words,
             prefix_pool: args.prefix_pool,
+            hot_prefix_share: args.hot_prefix_share,
+            session_turns: args.session_turns,
             max_tokens: args.max_tokens,
             stream: !args.no_stream,
             max_dispatch_lag_ms: args.max_dispatch_lag_ms,

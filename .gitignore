@@ -1,8 +1,15 @@
 /target
-/results
 .env
 .cache
 summary.rtf
+
+# Benchmark output. The reports, CDFs, campaign aggregates and worker counters
+# behind every number in RESULTS.md are committed, because a published result
+# with no data behind it is a claim. What stays out is the per-request record
+# stream, which is 22MB for one policy matrix and regenerates from `make bench`,
+# and the service logs, which are for debugging a run rather than reading it.
+results/**/records.jsonl
+results/**/*.log
 
 project_spec.md
 writing_prompt.md

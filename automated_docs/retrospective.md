@@ -258,6 +258,86 @@ instead of reporting it as noise.
 
 ---
 
+## R0.4 — Load-aware and session-aware
+
+**A hotspot needs somewhere to hurt, and the first attempt had nowhere.** The
+skew test concentrated 83% of requests on one worker, exactly as intended, and
+the balanced policy did nothing about it, because the hot worker never queued.
+The reason is a nice inversion: the worker holding the hot prefix serves it
+*from cache*, so its requests are the fastest in the fleet and it absorbs the
+load easily. Concentration only costs something once each request occupies a
+worker for a while regardless of caching, which means decode time. Raising the
+generated response to 32 tokens at 2ms each, and giving each worker four serving
+slots rather than thirty-two, made the hotspot real. Worth remembering as a
+modelling lesson: prefix caching removes prefill cost, not decode cost, so a
+mock where decode is free cannot show a cache-aware policy overloading anything.
+
+**Two silent patch failures, same cause.** Two edits to `policy.rs` did not
+apply and the compiler caught neither, because the surrounding code still made
+sense without them. Both had been reformatted by `cargo fmt` since the text was
+written, so the search string no longer matched. The fix is to assert the
+replacement happened rather than trusting it; the one that slipped through
+silently would have let the router send traffic to workers it had already
+ejected.
+
+**A test that asserted more than the arithmetic supported.** The first version
+of the KV-headroom test gave both workers a queue of two, and expected the
+worker at 98% KV to lose to one at 5% despite holding less of the prefix. It
+did not, and the scoring was right: with queue depth equal but non-zero, the
+match advantage narrowly outweighed the memory difference. Setting both queues
+to empty isolates the thing the test claims to be about, and it passes at the
+default weighting. The lesson is that a test of "signal X is used" should vary
+only X.
+
+**Naive affinity fails in the most instructive way possible.** On skewed traffic
+it produces the *highest* cache hit rate in the field and by far the worst
+latency, with throughput collapsing to well under half the offered rate. That is
+the clearest possible statement that hit rate is not the objective. A router
+optimising the metric that looks like success drives the system into the ground,
+and the metric keeps going up while it happens.
+
+**Skew makes the caching problem easy and the balancing problem hard.** When
+80% of requests share one prefix, that prefix fits comfortably in every worker's
+cache, so even round-robin achieves a high hit rate without trying. Cache-aware
+routing has almost nothing left to win and a great deal to lose. Together with
+the earlier crossover, the picture is that the technique pays in a fairly narrow
+band, and the honest version of the project's claim has to say so.
+
+**The best policy on the skewed workload is round-robin.** Not the balanced
+policy, and not by a little: 44.2ms p99 against balanced affinity's 120.5ms.
+This is the result the project would most like not to have found, which is
+exactly why it is in `RESULTS.md` next to the wins. The explanation is the one
+above, that skew makes caching easy, but the discipline is separate from the
+explanation. A comparison harness that only ever confirms its author's policy
+was not a comparison harness.
+
+**A stale load signal is worse than no load signal.** On the skewed workload
+`least-loaded` posted a p99 nearly three times round-robin's, with an identical
+hit rate and an identical spread of requests across workers, so cache behaviour
+explains none of it. Queue depth is polled every 100ms; for most of that window
+every routing decision reads the same snapshot and piles onto the same worker
+until the next poll corrects it. `power-of-two` landed between the two, which is
+the behaviour power-of-two-choices is known for and was not something the
+experiment was designed to show. Round-robin cannot herd because it does not
+look.
+
+Two consequences. Part of the balanced policy's tail on that workload is the
+same staleness rather than the affinity it retains, so the two costs are not
+currently separable. And the poll interval is now a routing parameter, not a
+monitoring parameter, which is not how it was originally treated.
+
+**An invalid run is a result about the harness, not a run to retry.** Getting
+the skewed matrix to produce three valid repetitions took three attempts. At
+90/s the generator fell 292ms behind schedule. At 60/s with 32 tokens at 2ms it
+still fell 158ms behind, and the cause was not load but timer wakeups: the
+router, three workers, and the generator share one laptop, and a fine token
+schedule swamped it. Eight tokens at 8ms is the same 64ms of worker occupancy
+with a quarter of the wakeups, and produced zero invalid runs. The harness
+refused to publish all three times without being asked to, which is the only
+reason the first two numbers are not in `RESULTS.md` today.
+
+---
+
 ## Scope change, spec v3.0
 
 The spec was cut from ten releases to five while R0.3 was being committed.

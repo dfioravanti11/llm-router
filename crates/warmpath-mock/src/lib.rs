@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod chat;
+pub mod metrics;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -258,6 +259,7 @@ pub fn router(state: MockState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/debug/stats", get(stats))
+        .route("/metrics", get(metrics_endpoint))
         .route("/v1/chat/completions", post(chat::chat_completions))
         .route("/v1/completions", post(chat::completions))
         .with_state(state)
@@ -265,6 +267,24 @@ pub fn router(state: MockState) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Worker metrics in vLLM's shape, which is what the router polls.
+async fn metrics_endpoint(State(state): State<MockState>) -> impl axum::response::IntoResponse {
+    let mut counters = state.counters();
+    counters.cache = state.cache_stats().await;
+
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        metrics::render(
+            &counters,
+            state.config().max_concurrency,
+            state.config().cache_blocks,
+        ),
+    )
 }
 
 async fn stats(State(state): State<MockState>) -> Json<Counters> {

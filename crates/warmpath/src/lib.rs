@@ -11,6 +11,8 @@ pub mod metrics;
 pub mod policy;
 pub mod prompt;
 pub mod proxy;
+pub mod session;
+pub mod state;
 pub mod worker;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -70,10 +72,13 @@ pub fn router(config: &Config) -> anyhow::Result<Router> {
         prompt_builder,
     };
 
+    state.pool.spawn_pollers();
+
     Ok(Router::new()
         .route("/health", get(proxy::health))
         .route("/metrics", get(proxy::metrics))
         .route("/debug/index", get(proxy::index_stats))
+        .route("/debug/workers", get(proxy::worker_stats))
         .route("/v1/chat/completions", post(proxy::proxy))
         .route("/v1/completions", post(proxy::proxy))
         .with_state(state))

@@ -331,6 +331,8 @@ mod tests {
             prompt_words: 8,
             shared_prefix_words: 0,
             prefix_pool: 0,
+            hot_prefix_share: 0.0,
+            session_turns: 0,
             max_tokens: 8,
             stream: true,
             max_dispatch_lag_ms: 10.0,

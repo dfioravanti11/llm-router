@@ -9,11 +9,19 @@ Working name. Expect it to change before a public release.
 
 ## Status
 
-R0.3. Prefix-affinity routing works. On a workload with prefix reuse and a
-fleet with room for the working set, it cuts p99 time to first token from
-47.5ms to 19.5ms against round-robin, with non-overlapping confidence
-intervals. `RESULTS.md` has the numbers, the condition they depend on, and the
-two regimes where the idea buys nothing.
+R0.4. Prefix-affinity routing works, and the conditions under which it works
+are measured. On even traffic with room in the fleet, balanced affinity cuts
+p99 time to first token from 46.0ms to 17.2ms against round-robin, with
+non-overlapping confidence intervals.
+
+On skewed traffic the naive form drives 80% of requests onto one worker and
+posts a median 64 times worse than round-robin, while recording the best cache
+hit rate in the field. The balanced form holds throughput and keeps most of the
+hit rate. Round-robin beats both, because heavy skew makes the hot prefix fit in
+every worker's cache and there is nothing left to arrange.
+
+`RESULTS.md` has the numbers, the confidence intervals, and the boundaries of
+where the technique pays at all.
 
 What works today:
 
@@ -25,8 +33,15 @@ What works today:
   block hash per 16 tokens.
 - An approximate block index inferred from the router's own dispatches, with
   leaf-first least-recently-used eviction and in-flight block reservation.
-- Four policies, switchable in config: `round-robin` and `first` as baselines,
-  `prefix-affinity` and `prefix-affinity-balanced`.
+- Six policies, switchable in config: `round-robin`, `least-loaded`,
+  `power-of-two`, and `first` as cache-blind baselines, plus `prefix-affinity`
+  and `prefix-affinity-balanced`.
+- Worker state polled from each worker's `/metrics` in vLLM's own format: queue
+  depth, KV utilization, and the worker's own prefix cache hit rate.
+- Health checking with ejection and re-admission, and a single retry on another
+  worker when the first never answered.
+- Session affinity: a client sets `x-session-id` and its conversation sticks to
+  one worker unless that worker fails or the fleet needs rebalancing.
 - Prometheus metrics and a Grafana dashboard.
 - `warmpath-bench`: an open-loop load generator with intended-time latency
   accounting, warmup exclusion, run manifests carrying config and seed and git
@@ -34,9 +49,8 @@ What works today:
 - A mock worker with bounded concurrency, queueing, and a simulated block-level
   prefix cache, so all of the above runs without a GPU.
 
-Not built yet: worker load and KV-pressure polling, session affinity, and
-health checking (R0.4), then real vLLM, the router's own overhead, and the
-ship-ready repo (R0.5).
+Not built yet: real vLLM, the router's own measured overhead, Docker Compose,
+and the design doc (R0.5, the ship point).
 
 ## Layout
 
@@ -49,7 +63,8 @@ ship-ready repo (R0.5).
 | `config/warmpath.toml` | Router configuration |
 | `deploy/` | Prometheus scrape config and the Grafana dashboard |
 | `scripts/co-demo.sh` | The coordinated-omission comparison |
-| `scripts/policy-compare.sh` | Routing policies measured against each other |
+| `scripts/policy-compare.sh` | Routing policies on one workload shape |
+| `scripts/policy-matrix.sh` | Every policy against every workload shape |
 | `scripts/fetch-model.sh` | Downloads the model tokenizer and chat template |
 
 ## Running it
@@ -95,7 +110,7 @@ make bench
 Two comparisons that start and stop everything themselves:
 
 ```
-make policy-compare
+make policy-matrix
 make co-demo
 ```
 

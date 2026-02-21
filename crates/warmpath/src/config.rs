@@ -28,7 +28,42 @@ pub struct Config {
     pub index: IndexConfig,
     #[serde(default)]
     pub model: ModelConfig,
+    #[serde(default)]
+    pub health: HealthConfig,
     pub workers: Vec<WorkerConfig>,
+}
+
+/// Polling the workers, and deciding when one has stopped answering.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HealthConfig {
+    /// How often each worker's metrics endpoint is read. This is the router's
+    /// only view of queue depth and KV pressure, so a long interval means
+    /// routing on stale load.
+    pub poll_interval_ms: u64,
+    /// Path appended to a worker's base URL to reach its metrics.
+    pub metrics_path: String,
+    /// Consecutive failed polls before a worker stops receiving traffic. More
+    /// than one, so a single dropped packet does not eject a healthy worker.
+    pub unhealthy_after: u32,
+    /// Consecutive successful polls before an ejected worker is used again.
+    pub healthy_after: u32,
+    /// Retry a request once on a different worker when the first never
+    /// answered. Only safe before anything has streamed, which is why it
+    /// applies to connection failures alone.
+    pub retry_on_dispatch_failure: bool,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_ms: 500,
+            metrics_path: "/metrics".to_string(),
+            unhealthy_after: 3,
+            healthy_after: 2,
+            retry_on_dispatch_failure: true,
+        }
+    }
 }
 
 /// Where the router gets its tokenizer and chat template.
@@ -60,8 +95,14 @@ pub enum Policy {
     /// state. This is the baseline every later policy is measured against.
     #[default]
     RoundRobin,
+    /// Fewest requests in flight at the worker wins. A cache-blind baseline
+    /// that reacts to load, which round-robin does not.
+    LeastLoaded,
+    /// Two workers at random, the less loaded one wins. Cheaper than scanning
+    /// the fleet and famously close to the same result.
+    PowerOfTwo,
     /// Longest prefix match wins, with no regard for load. The naive form,
-    /// kept honest so R0.4 can find the workload where it hotspots.
+    /// kept honest so a skewed workload can show it hotspotting.
     PrefixAffinity,
     /// Prefix match, load, and fleet balance together.
     PrefixAffinityBalanced,
@@ -73,6 +114,8 @@ impl Policy {
         match self {
             Policy::First => "first",
             Policy::RoundRobin => "round-robin",
+            Policy::LeastLoaded => "least-loaded",
+            Policy::PowerOfTwo => "power-of-two",
             Policy::PrefixAffinity => "prefix-affinity",
             Policy::PrefixAffinityBalanced => "prefix-affinity-balanced",
         }
@@ -91,13 +134,32 @@ impl Policy {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+fn default_session_capacity() -> usize {
+    100_000
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct RoutingConfig {
     #[serde(default)]
     pub policy: Policy,
     #[serde(default)]
     pub affinity: AffinityConfig,
+    /// Sessions remembered for affinity. Session ids come from clients, so
+    /// this is bounded on purpose: without a limit a client could grow the map
+    /// without end. Zero disables session affinity.
+    #[serde(default = "default_session_capacity")]
+    pub session_capacity: usize,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            policy: Policy::default(),
+            affinity: AffinityConfig::default(),
+            session_capacity: default_session_capacity(),
+        }
+    }
 }
 
 /// Thresholds for the two prefix-affinity policies.
@@ -275,6 +337,16 @@ impl Config {
                 affinity.load_weight
             );
         }
+        if self.health.unhealthy_after == 0 || self.health.healthy_after == 0 {
+            bail!("health.unhealthy_after and health.healthy_after must be positive");
+        }
+        if !self.health.metrics_path.starts_with('/') {
+            bail!(
+                "health.metrics_path must start with /, got `{}`",
+                self.health.metrics_path
+            );
+        }
+
         if affinity.balance_rel_threshold < 1.0 {
             bail!(
                 "routing.affinity.balance_rel_threshold must be at least 1, got {}",
@@ -401,9 +473,66 @@ mod tests {
 
     #[test]
     fn baseline_policies_do_not_ask_for_a_prompt_fingerprint() {
-        assert!(!Policy::RoundRobin.needs_prompt_fingerprint());
-        assert!(!Policy::First.needs_prompt_fingerprint());
+        for policy in [
+            Policy::RoundRobin,
+            Policy::First,
+            Policy::LeastLoaded,
+            Policy::PowerOfTwo,
+        ] {
+            assert!(
+                !policy.needs_prompt_fingerprint(),
+                "{policy:?} should not pay for prompt building"
+            );
+        }
         assert!(Policy::PrefixAffinity.needs_prompt_fingerprint());
+        assert!(Policy::PrefixAffinityBalanced.needs_prompt_fingerprint());
+    }
+
+    #[test]
+    fn every_policy_has_a_distinct_stable_name() {
+        let names: Vec<&str> = [
+            Policy::First,
+            Policy::RoundRobin,
+            Policy::LeastLoaded,
+            Policy::PowerOfTwo,
+            Policy::PrefixAffinity,
+            Policy::PrefixAffinityBalanced,
+        ]
+        .iter()
+        .map(|policy| policy.as_str())
+        .collect();
+
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "{names:?}");
+    }
+
+    #[test]
+    fn health_settings_are_validated() {
+        let err = config_from(
+            r#"
+            [health]
+            unhealthy_after = 0
+
+            [[workers]]
+            name = "w0"
+            url = "http://127.0.0.1:8001"
+            "#,
+        )
+        .expect_err("zero should be rejected");
+        assert!(err.to_string().contains("unhealthy_after"), "got: {err}");
+
+        let err = config_from(
+            r#"
+            [health]
+            metrics_path = "metrics"
+
+            [[workers]]
+            name = "w0"
+            url = "http://127.0.0.1:8001"
+            "#,
+        )
+        .expect_err("a relative path should be rejected");
+        assert!(err.to_string().contains("metrics_path"), "got: {err}");
     }
 
     #[test]
