@@ -2,14 +2,16 @@
 
 > Update this file whenever a milestone's exit criteria are met, scope changes, or the "what's next" changes. Milestones and exit criteria are defined in `project_spec.md` §3 (Release Roadmap) — this file tracks progress against them, it doesn't redefine them.
 
-## Current phase: R0.4 complete, starting R0.5
+## Current phase: R0.5, everything that does not need a GPU
 
 The router builds a prompt fingerprint with the model's own tokenizer, keeps an
 approximate block index with in-flight reservation, polls each worker for queue
 depth and KV pressure, and chooses among six policies. Health checking, a single
 retry, and session affinity are in.
 
-R0.5 is the ship point and the only milestone that needs a GPU.
+R0.5 is the ship point. Its GPU half is blocked on renting hardware. Its other
+half is being worked through: the compose stack is written, and the router's own
+overhead is measured at the median and unresolvable at p99 on this machine.
 
 ## Milestones
 
@@ -104,14 +106,23 @@ point at which the project is finished.
    agreement with it does not count.
 3. Fix whatever the mock got wrong, and publish the divergence either way.
 4. Re-run the R0.3 and R0.4 comparisons on real hardware.
-5. Flamegraph the router and publish its own added latency, flattering or not.
-6. Negative-results pass: at least one documented losing regime. Two are
+5. Flamegraph the router. Its added latency is now measured by subtraction in
+   `RESULTS.md`: under about 0.3ms to proxy, and 1.2ms at the median to build
+   the fingerprint, roughly two thirds of which is tokenizing. The spec's
+   requirement is stated at p99, and p99 came back unresolvable, because the
+   noise floor of one laptop running the generator, the router and the worker
+   is larger than the quantity. Redo it with the generator on its own machine.
+6. Negative-results pass: at least one documented losing regime. Three are
    already in `RESULTS.md`, so this is mostly a matter of confirming they
    survive real workers.
-7. Docker Compose, so a stranger can bring the stack up. Untested so far,
-   because Docker is not installed on this machine.
+7. Verify the compose stack. `compose.yaml`, the `Dockerfile`, and Grafana
+   provisioning are written and the YAML parses, but nothing has been run,
+   because Docker is not installed on this machine. Treat it as unverified
+   until someone runs `docker compose up --build`.
 8. `docs/DESIGN.md` with alternatives considered and what would change at a
-   hundred workers. Apache-2.0, README with the headline chart, repo hygiene.
+   hundred workers. `automated_docs/architecture.md` already covers most of
+   this, so the open question is whether a second document earns its place or
+   the existing one is simply promoted.
 
 ## Open risks to watch
 

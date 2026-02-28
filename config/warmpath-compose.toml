@@ -1,0 +1,104 @@
+# Warmpath router configuration for the compose stack.
+#
+# Mounted read-only at /etc/warmpath/warmpath.toml by compose.yaml. Same as
+# config/warmpath.toml apart from the worker addresses, which are compose
+# service names, and the policy, which is the cache-aware one so the stack
+# shows what the project is about.
+
+[server]
+bind = "0.0.0.0:8080"
+# Request bodies are buffered so the prompt builder can read the full
+# conversation from R0.3 onward.
+max_request_bytes = 4194304
+
+[upstream]
+connect_timeout_ms = 2000
+# Read timeout, not a total-request timeout: a long generation is healthy, a
+# stalled stream is not.
+read_timeout_ms = 60000
+
+[routing]
+# Cache-blind baselines: `round-robin` rotates evenly, `least-loaded` picks the
+# shortest queue, `power-of-two` picks the lighter of two candidates, and
+# `first` pins everything to one worker.
+#
+# Cache-aware: `prefix-affinity` sends a request to whichever worker already
+# holds the most of its prompt, ignoring load entirely.
+# `prefix-affinity-balanced` weighs the match against queue depth and KV
+# pressure, and yields completely when the fleet tips out of balance.
+#
+# On skewed traffic the difference matters a great deal; see RESULTS.md.
+policy = "prefix-affinity-balanced"
+
+# Sessions remembered so a multi-turn conversation returns to the worker holding
+# its history. Clients opt in with an `x-session-id` header. Bounded on purpose,
+# since the ids come from clients. Zero disables it.
+session_capacity = 100000
+
+[routing.affinity]
+# Smallest share of a prompt's blocks worth routing on. A trivial overlap should
+# not drag a request onto a particular worker.
+cache_threshold = 0.2
+# The busiest worker must exceed this many in-flight requests before the fleet
+# can be called imbalanced. Without it, one against zero looks like a crisis.
+balance_abs_threshold = 8
+# And it must be this many times deeper than the quietest worker.
+balance_rel_threshold = 2.0
+# Share of the balanced score that comes from headroom rather than cache
+# locality. Zero picks the longest match; one ignores the cache entirely.
+load_weight = 0.3
+
+[index]
+# Token ids per block. Must match the worker's, or the two are describing
+# different things.
+block_size = 16
+# Blocks one worker is assumed to hold before the index models an eviction.
+# This is a guess about the engine's capacity, not a reading of it. Matched
+# here to the mock workers' --cache-blocks, which a real deployment cannot do
+# and has to estimate.
+block_budget = 112
+
+[health]
+# Each worker's metrics endpoint is polled for queue depth, KV utilization, and
+# its own prefix cache counters. This is the router's only view of worker
+# pressure, so a long interval means routing on stale load.
+poll_interval_ms = 500
+metrics_path = "/metrics"
+# Consecutive failed polls before a worker stops receiving traffic, and
+# consecutive successes before it is used again. More than one either way, so a
+# single dropped packet does not eject a healthy worker.
+unhealthy_after = 3
+healthy_after = 2
+# Retry once on another worker when the first never answered. Only safe before
+# anything has streamed, which is why it covers connection failures alone.
+retry_on_dispatch_failure = true
+
+[model]
+# Directory holding tokenizer.json and tokenizer_config.json, from
+# `make fetch-model`. Commented out means the router uses a deterministic
+# development tokenizer, which is only valid against the mock worker: against a
+# real engine the router would cut blocks at different boundaries than the
+# worker, and the symptom is a mediocre hit rate rather than an error.
+#
+# When this is set and the files cannot be loaded, startup fails rather than
+# falling back, because a silent fallback is exactly that failure.
+# Left off, so `docker compose up` works without `make fetch-model` first.
+# The mock workers are then using the same development tokenizer, so the two
+# agree and the stack is self-consistent. It is not what a real deployment
+# looks like: against a real engine the router must load the model's own
+# tokenizer or it cuts blocks at different boundaries than the worker.
+#
+# To turn it on, run `make fetch-model` and uncomment the line below.
+# directory = "/home/warmpath/.cache/qwen3-1.7b"
+
+[[workers]]
+name = "worker-0"
+url = "http://worker-0:8001"
+
+[[workers]]
+name = "worker-1"
+url = "http://worker-1:8001"
+
+[[workers]]
+name = "worker-2"
+url = "http://worker-2:8001"

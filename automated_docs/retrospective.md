@@ -336,6 +336,45 @@ with a quarter of the wakeups, and produced zero invalid runs. The harness
 refused to publish all three times without being asked to, which is the only
 reason the first two numbers are not in `RESULTS.md` today.
 
+**Measuring your own overhead is harder than measuring a policy.** A routing
+policy changes latency by tens of milliseconds, which a laptop can resolve. The
+router's own cost is around a millisecond, which it cannot. The first attempt
+left the mock worker's simulated prefill switched on, putting about 10ms of
+modelled work underneath a difference near 1ms, and it reported round-robin as
+4.33ms faster than not using a router at all. A negative overhead is
+arithmetically possible and physically nonsense, and it was the useful signal:
+the experiment had no resolution.
+
+Three changes fixed the median and not the tail. Make the worker as close to
+free as it goes, since the router's cost does not depend on the worker's speed
+and every millisecond the worker spends is variance added to a measurement of
+something else. Raise the repetitions. Report the delta against its own
+interval, and label it unresolved when it is smaller.
+
+The tail is still unresolved and probably cannot be resolved here at all. The
+worst one percent of requests on a laptop running the generator, the router and
+the worker is mostly the operating system choosing between three processes.
+That is not a number to publish, and the requirement is recorded as unverified
+rather than met.
+
+**Being a proxy is cheap and being cache aware is not.** Under 0.3ms to accept a
+request and stream it back, against 1.2ms to render the chat template, tokenize,
+chain the hashes and query the index. Re-running with the whitespace development
+tokenizer put the same figure at 0.42ms, which locates roughly two thirds of the
+cost in tokenization alone. That is the one part of the work that cannot be
+dropped, since matching the worker's block boundaries is the whole mechanism.
+It can be avoided rather than made cheaper: a conversation re-sends its history
+every turn and the router tokenizes all of it again, so per-session caching of
+the tokenized prefix is in the spec and is not implemented. The number is a
+ceiling, not a property.
+
+**The reflog timed out.** Committing R0.4 failed with an I/O timeout writing
+`.git/logs/refs/heads/main`, and `git add -A` took two minutes and twenty
+seconds at zero percent CPU. The repository is under `~/Desktop`, which is
+synced by iCloud, so every git write goes through the file provider. A retry
+landed in nine seconds. Worth knowing before diagnosing a phantom git problem,
+and worth moving the checkout out of a synced directory.
+
 ---
 
 ## Scope change, spec v3.0

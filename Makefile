@@ -1,4 +1,4 @@
-.PHONY: help build test fmt fmt-check lint check fetch-model run-mock run bench co-demo policy-compare policy-matrix clean
+.PHONY: help build test fmt fmt-check lint check fetch-model run-mock run bench co-demo policy-compare policy-matrix overhead clean
 
 help:
 	@echo "build      compile the workspace"
@@ -14,6 +14,7 @@ help:
 	@echo "co-demo    the coordinated-omission comparison, start to finish"
 	@echo "policy-compare  routing policies on one workload shape"
 	@echo "policy-matrix   every policy against every workload shape"
+	@echo "overhead   what the router itself costs, against one worker"
 
 build:
 	cargo build --workspace
@@ -56,6 +57,9 @@ policy-compare:
 
 policy-matrix:
 	./scripts/policy-matrix.sh
+
+overhead:
+	./scripts/overhead.sh
 
 clean:
 	cargo clean

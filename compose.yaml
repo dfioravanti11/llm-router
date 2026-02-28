@@ -1,0 +1,97 @@
+# The whole stack: the router, three mock workers, Prometheus, and Grafana.
+#
+#   docker compose up --build
+#
+# Then the router is on http://localhost:8080 and Grafana on
+# http://localhost:3000, already pointed at Prometheus with the dashboard
+# loaded. No login.
+#
+# The workers are mocks, so nothing here is a measurement of inference. What it
+# is good for is seeing the router route, watching the metrics move, and having
+# somewhere to send a request without a GPU.
+#
+# Load it with the same generator the results use:
+#
+#   cargo run --release -p warmpath-bench -- run \
+#     --target http://localhost:8080 --rate 50 --duration 30 --warmup 5 \
+#     --shared-prefix-words 256 --prefix-pool 10 --out results/compose
+#
+# Change the policy in config/warmpath-compose.toml and bring the router back up
+# to compare.
+
+services:
+  worker-0: &worker
+    build: .
+    image: warmpath:local
+    command:
+      - warmpath-mock
+      - --bind=0.0.0.0:8001
+      # Small enough that a working set of ten 256-word prefixes does not fit in
+      # one worker, which is the regime cache-aware routing is for. See
+      # RESULTS.md.
+      - --cache-blocks=112
+      - --block-size=16
+      - --max-concurrency=32
+      - --ttft-ms=1
+      - --inter-token-ms=1
+      - --prefill-per-token-us=120
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  worker-1:
+    <<: *worker
+
+  worker-2:
+    <<: *worker
+
+  router:
+    build: .
+    image: warmpath:local
+    command: ["warmpath", "--config", "/etc/warmpath/warmpath.toml"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config/warmpath-compose.toml:/etc/warmpath/warmpath.toml:ro
+      # The model's tokenizer and chat template, when `make fetch-model` has
+      # been run. The config leaves [model] commented out, so an absent .cache
+      # is not an error; see the note in that file about what it costs.
+      - ./.cache:/home/warmpath/.cache:ro
+    depends_on:
+      worker-0:
+        condition: service_healthy
+      worker-1:
+        condition: service_healthy
+      worker-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - router
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    ports:
+      - "3000:3000"
+    environment:
+      # A demo stack on a laptop. Do not put this on a network you share.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/warmpath.json:/var/lib/grafana/dashboards/warmpath.json:ro
+    depends_on:
+      - prometheus

@@ -49,8 +49,7 @@ What works today:
 - A mock worker with bounded concurrency, queueing, and a simulated block-level
   prefix cache, so all of the above runs without a GPU.
 
-Not built yet: real vLLM, the router's own measured overhead, Docker Compose,
-and the design doc (R0.5, the ship point).
+Not built yet: real vLLM, which is the whole of R0.5 and the ship point.
 
 ## Layout
 
@@ -61,17 +60,31 @@ and the design doc (R0.5, the ship point).
 | `crates/warmpath-bench` | The load generator and statistics harness |
 | `crates/warmpath-mock` | Mock inference worker for GPU-free development |
 | `config/warmpath.toml` | Router configuration |
-| `deploy/` | Prometheus scrape config and the Grafana dashboard |
+| `deploy/` | Prometheus scrape config, Grafana dashboard and provisioning |
+| `compose.yaml` | Router, three mock workers, Prometheus, Grafana |
+| `Dockerfile` | Builds the router and the mock worker into one image |
 | `scripts/co-demo.sh` | The coordinated-omission comparison |
 | `scripts/policy-compare.sh` | Routing policies on one workload shape |
 | `scripts/policy-matrix.sh` | Every policy against every workload shape |
+| `scripts/overhead.sh` | What the router itself costs, against one worker |
 | `scripts/fetch-model.sh` | Downloads the model tokenizer and chat template |
 
 ## Running it
 
-The router needs the target model's tokenizer and chat template, so it cuts
-prompts into the same blocks a worker will. Only those two files are needed, not
-the weights:
+The whole stack, with three workers, Prometheus, and a Grafana dashboard:
+
+```
+docker compose up --build
+```
+
+The router is then on `http://localhost:8080` and Grafana on
+`http://localhost:3000` with the dashboard already loaded and no login. The
+workers are mocks, so this is somewhere to watch the router route rather than a
+measurement of inference.
+
+To run it from source instead, the router wants the target model's tokenizer and
+chat template, so it cuts prompts into the same blocks a worker will. Only those
+two files are needed, not the weights:
 
 ```
 make fetch-model
@@ -112,6 +125,7 @@ Two comparisons that start and stop everything themselves:
 ```
 make policy-matrix
 make co-demo
+make overhead
 ```
 
 Each run writes a directory under `results/` holding `report.json` (config,

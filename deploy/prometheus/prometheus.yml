@@ -1,4 +1,9 @@
-# Scrapes the router. Add one job per mock worker when their metrics land.
+# Scrapes the router and every mock worker inside the compose network.
+#
+# The worker job matters as much as the router job: the workers report their own
+# prefix cache hit rate, which is the number the router does not control and
+# cannot talk itself into. Comparing it against the router's predicted hit rate
+# is the check that stops the router grading its own homework.
 global:
   scrape_interval: 1s
   evaluation_interval: 15s
@@ -7,4 +12,12 @@ scrape_configs:
   - job_name: warmpath
     metrics_path: /metrics
     static_configs:
-      - targets: ["host.docker.internal:8080"]
+      - targets: ["router:8080"]
+
+  - job_name: warmpath-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "worker-0:8001"
+          - "worker-1:8001"
+          - "worker-2:8001"

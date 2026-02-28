@@ -4,6 +4,29 @@ Notable changes to this project, newest first. Update this alongside any commit 
 
 Format per entry: `## YYYY-MM-DD — short title`, then a few bullets of what changed and why (link to the relevant roadmap release from `project_status.md` when applicable).
 
+## 2026-02-28 — Router overhead measured, and the compose stack
+
+- `scripts/overhead.sh` and `make overhead` measure what the router costs, by
+  running the same near-free worker three ways: direct, through the router
+  without reading the prompt, and through the router doing the full fingerprint.
+  One worker in every arm, so nothing measured is a routing decision.
+- Result: proxying costs under about 0.3ms and cannot be separated from zero.
+  Building the fingerprint costs 1.2ms at the median, which holds under both
+  clocks and is four times its own confidence interval. Roughly two thirds of
+  that is tokenizing a 280 word prompt.
+- The spec's actual requirement is under 1ms at p99, and that came back
+  unresolved: every p99 interval is wide enough to contain zero. An earlier
+  version of the experiment reported the router as 4.33ms *faster* than not
+  using it, which is what a measurement with no resolution looks like. Recorded
+  as unverified rather than passed.
+- `compose.yaml` and a `Dockerfile` bring up the router, three mock workers,
+  Prometheus, and Grafana with the dashboard provisioned. Prometheus now scrapes
+  the workers as well as the router, since the workers report the hit rate the
+  router does not control. Unverified: Docker is not installed on this machine.
+- Benchmark artifacts are committed from this point on, per the spec's
+  reproducibility requirement. Per-request record streams and service logs stay
+  ignored.
+
 ## 2026-02-21 — R0.4 load-aware and session-aware
 
 - The mock worker exposes `/metrics` using vLLM's own metric names, so the

@@ -1,0 +1,19 @@
+[server]
+bind = "127.0.0.1:19080"
+
+[routing]
+policy = "round-robin"
+
+[index]
+block_size = 16
+block_budget = 4096
+
+[health]
+poll_interval_ms = 100
+
+[model]
+directory = ".cache/qwen3-1.7b"
+
+[[workers]]
+name = "w0"
+url = "http://127.0.0.1:19001"

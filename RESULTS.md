@@ -175,6 +175,113 @@ the spec names as the project's highest risk, and the reason the router now
 refuses to start when a configured model directory will not load rather than
 falling back.
 
+## What the router itself costs
+
+**Command:** `make overhead`
+
+The spec asks the router to add under 1ms to p99 time to first token, measured
+rather than asserted. This is the measurement, and it does not fully succeed.
+
+One worker in all three arms, so nothing here is a routing decision. The worker
+is configured as close to free as it goes, with no simulated prefill and one
+token, because the router's work does not depend on how slow the worker is and
+every millisecond the worker spends is variance added to a measurement of
+something else.
+
+- **direct** sends the load generator straight at the worker.
+- **round-robin** goes through the router, which parses the request, proxies it
+  and streams it back without ever reading the prompt.
+- **prefix-affinity-balanced** goes through the router doing all of its work:
+  render the chat template, tokenize, chain the block hashes, query the index,
+  reserve the blocks.
+
+Five runs per arm at 50 arrivals a second, arm order rotated, real Qwen3-1.7B
+tokenizer.
+
+| arm | p50 TTFT | p99 TTFT |
+|---|---:|---:|
+| direct | 4.35 +/-0.16 ms | 7.51 +/-2.02 ms |
+| round-robin | 4.63 +/-0.24 ms | 8.00 +/-8.25 ms |
+| prefix-affinity-balanced | 5.55 +/-0.19 ms | 10.79 +/-5.09 ms |
+
+| added by the router | p50 | p99 |
+|---|---:|---:|
+| round-robin | +0.28 +/-0.29 ms, unresolved | +0.49 +/-8.49 ms, unresolved |
+| prefix-affinity-balanced | **+1.20 +/-0.25 ms** | +3.28 +/-5.48 ms, unresolved |
+
+Being a proxy is nearly free. The 0.28ms is smaller than its own interval, so
+this setup cannot separate it from zero, and the honest reading is that it is
+under about 0.3ms rather than that it is 0.28ms.
+
+Being cache aware is not free. The 1.20ms is four times its interval and holds
+under both clocks, so it is a real cost and it is larger than the whole budget
+the spec set for p99.
+
+### The p99 answer is that this laptop cannot answer it
+
+Every p99 delta came back smaller than its own confidence interval. The
+round-robin arm's p99 interval is +/-8.25ms around a number near 8ms, which is
+wide enough to contain zero and to contain a negative overhead. An earlier
+version of this experiment, with the worker's prefill left switched on, actually
+reported round-robin as **4.33ms faster** than talking to the worker directly.
+That is not a result. It is the sound of a measurement with no resolution.
+
+The cause is the setup. The load generator, the router and the worker share one
+laptop, so the worst one percent of requests is mostly the operating system
+scheduling three processes against each other. That noise is larger than the
+quantity being measured.
+
+So the spec's requirement is **not currently verified**. It is not refuted
+either. Verifying it needs the generator and the router on separate quiet
+machines, which is R0.5 hardware work.
+
+### Most of that 1.2ms is tokenizing
+
+**Command:** `OUT=results/overhead-devtok MODEL_DIR=/nonexistent ARMS="direct prefix-affinity-balanced" ./scripts/overhead.sh`
+
+The same experiment with the development tokenizer, which splits on whitespace
+and hashes, in place of Qwen3's.
+
+| added by the router | p50 from dispatch |
+|---|---:|
+| with the model's tokenizer | +1.23 +/-0.23 ms |
+| with the development tokenizer | +0.42 +/-0.10 ms |
+
+So roughly 0.8ms of the 1.2ms is the tokenizer, and the remaining 0.4ms covers
+rendering the chat template, chaining the block hashes, querying the index and
+reserving the blocks. Tokenizing a 280 word prompt is the expensive part of
+being cache aware, and it is the part that cannot be given up: matching the
+worker's block boundaries is the entire mechanism.
+
+Two caveats on the subtraction. The two tokenizers produce different token
+counts and therefore different numbers of blocks, so the index work is not held
+quite constant. And the workers differ between the two arms in the same way, so
+each delta is router-attributable within its own configuration while their
+difference is an estimate rather than a measurement.
+
+The obvious response is to stop tokenizing whole conversations repeatedly. A
+multi-turn session re-sends its entire history every turn, and the prefix of
+that history has been tokenized before. Per-session tokenizer caching is in the
+spec and is not implemented, which makes this number a ceiling rather than a
+fixed property.
+
+### Both clocks agree
+
+Latency from intended dispatch time is the honest measure of what a client
+experiences and it is the headline everywhere else here. It also carries the
+generator's own scheduling lag, which on a shared laptop is not small and is not
+the router's fault. Measuring from actual dispatch drops that lag, at the cost of
+hiding queueing that the router caused. Nothing queues in this experiment, so
+both views should agree, and they do.
+
+| added by the router | p50 from intended | p50 from dispatch |
+|---|---:|---:|
+| round-robin | +0.28 ms | +0.29 ms |
+| prefix-affinity-balanced | +1.20 ms | +1.23 ms |
+
+Agreement to a hundredth of a millisecond is the reason to believe the p50
+numbers at all.
+
 ## Closed-loop load generators under-report the tail
 
 **Command:** `make co-demo`
@@ -248,7 +355,10 @@ worth reading.
 - Anything on real hardware. R0.5.
 - The router's predicted hit rate against a worker's own reported hit rate,
   where the worker is vLLM rather than a model of vLLM. R0.5.
-- The router's own added latency. R0.5 measures it with a flamegraph and
-  publishes the number whether or not it is flattering.
+- The router's added latency at p99. Measured above and unresolved, because the
+  noise floor of one laptop running all three processes is larger than the
+  quantity. Needs separate quiet machines, which is R0.5.
+- Where the 1.2ms of fingerprinting goes, at the level of a profile rather than
+  a subtraction. R0.5 flamegraphs it.
 - Whether session affinity adds anything on top of prefix affinity. The
   mechanism is implemented and tested; no run has shown it earning its place.
