@@ -6,6 +6,9 @@ inference; it is evidence about the harness and the router.
 
 Real vLLM enters at R0.5. Nothing below has touched a GPU.
 
+Every chart redraws from the committed data with `python3 scripts/plot.py`,
+and every number regenerates with `make bench`.
+
 ## The policy matrix
 
 **Command:** `make policy-matrix`
@@ -19,6 +22,8 @@ restarted per arm, arm order rotated between repetitions.
 Two workload shapes, because they ask different questions.
 
 ### Even traffic: every prefix equally popular
+
+![Time to first token by policy on even traffic](docs/charts/even-ttft-tail.png)
 
 Nothing hotspots here, so this isolates cache locality. Each worker holds 112
 blocks against a working set near 200, so no worker can hold it all and the
@@ -44,6 +49,8 @@ affinity is less stable run to run, which turns out to be the mild version of
 what the next table shows.
 
 ### Skewed traffic: 80% of requests share one prefix
+
+![Naive affinity concentrates traffic and loses the tail](docs/charts/skewed-affinity-hotspot.png)
 
 Real prefix popularity is heavily skewed, so this is the more realistic shape.
 Each worker now has four serving slots and a request occupies one for about
@@ -177,6 +184,8 @@ falling back.
 
 ## What the router itself costs
 
+![Router overhead against direct-to-worker](docs/charts/router-overhead.png)
+
 **Command:** `make overhead`
 
 The spec asks the router to add under 1ms to p99 time to first token, measured
@@ -284,6 +293,8 @@ numbers at all.
 
 ## Closed-loop load generators under-report the tail
 
+![Open loop against closed loop on the same worker](docs/charts/coordinated-omission.png)
+
 **Command:** `make co-demo`
 
 The same worker, measured two ways.
@@ -360,5 +371,21 @@ worth reading.
   quantity. Needs separate quiet machines, which is R0.5.
 - Where the 1.2ms of fingerprinting goes, at the level of a profile rather than
   a subtraction. R0.5 flamegraphs it.
-- Whether session affinity adds anything on top of prefix affinity. The
-  mechanism is implemented and tested; no run has shown it earning its place.
+- Whether session affinity adds anything on top of prefix affinity. Nothing
+  here exercises it at all. The load generator builds one system message and one
+  user question per request and never sends an `x-session-id` header, so every
+  measured request is a first turn. The router's session map is implemented and
+  unit tested and has never influenced a published number.
+
+  The generator used to accept a `--session-turns` argument that did nothing,
+  while recording the value in every run manifest. It now refuses any value
+  other than one, because a manifest describing a workload the run did not
+  perform is worse than a missing feature. Multi-turn and agentic replay are
+  Appendix A3 in the spec, closed until R0.5 ships.
+
+- Whether per-session tokenizer caching would recover the 1.2ms. It is specified
+  and unimplemented, and it cannot help the workloads here even in principle,
+  since caching a conversation's tokenized history needs a second turn and there
+  is never a second turn. The measurement above is therefore the uncached cost on
+  single-turn traffic, which is the worst case for the router and the best case
+  for the honesty of the number.

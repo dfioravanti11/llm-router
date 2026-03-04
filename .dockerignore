@@ -1,0 +1,22 @@
+# Keeps the build context to the sources cargo actually needs.
+#
+# Without this, a local `target/` of several gigabytes is uploaded to the daemon
+# on every build, and on this repo that is slower than the compile. The image
+# builds its own target/ inside the builder stage, so a host one is never wanted.
+target/
+.git/
+.github/
+
+# Benchmark output and the downloaded tokenizer are mounted or written at run
+# time, so they have no business in the image.
+results/
+.cache/
+
+.env
+*.md
+!crates/**/*.md
+automated_docs/
+scripts/
+Makefile
+compose.yaml
+deploy/

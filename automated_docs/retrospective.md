@@ -375,6 +375,48 @@ synced by iCloud, so every git write goes through the file provider. A retry
 landed in nine seconds. Worth knowing before diagnosing a phantom git problem,
 and worth moving the checkout out of a synced directory.
 
+**Writing the design document found two defects that testing had not.** Both
+were invisible to the test suite because both were about things the code never
+did rather than things it did wrong.
+
+The metrics poller shares the proxy's HTTP client. That is reasonable until you
+notice the proxy's read timeout is deliberately long, because a slow generation
+is a healthy generation, and the poller inherited it. One worker that accepted a
+connection and then went quiet would hold the sequential poll loop for a minute
+while every other worker's load reading went stale. No test caught it because no
+test had ever stalled a worker rather than closing the connection on it. The
+regression test now does exactly that, and it fails without the fix.
+
+The load generator's `--session-turns` argument did nothing. It was parsed,
+threaded into `RunConfig`, and written into every run manifest, while the
+workload code never read it and the request path never sent a session header.
+Every published run therefore carries a field describing a workload property
+that did not exist. This is the same class of failure the project names as its
+worst, a wrong answer that looks like a right one, and it had been sitting in the
+manifests since R0.4. It now refuses any value above one.
+
+The second one has a consequence beyond the flag. Session affinity has never
+been exercised by any benchmark in this repo, so calling it unvalidated was too
+generous. `RESULTS.md` now says the mechanism has never influenced a published
+number.
+
+**An agent writing prose was a better reviewer than a reviewer.** Both defects
+came out of an attempt to explain the design to a stranger, which forces a
+question testing does not: what happens when N is not three. Two of my own
+framings turned out to be wrong under that pressure. I had described the metrics
+polling as a thundering herd, and it is the opposite shape, a single sequential
+task whose period grows with fleet size. I had also quoted the poll interval as
+100ms, which is what the benchmark scripts set, while the shipped default is
+500ms and therefore worse.
+
+**The disk filled up mid-run and everything started failing strangely.** Git
+reported `mmap failed: Operation canceled`, an agent hit `ENOSPC`, and a
+background task died writing its own output. The volume was at 100% with 139MB
+free. `target/debug` alone was 7.6GB, which is regenerable, and removing it
+recovered 12GB. Worth recognising early: when several unrelated tools start
+failing in unrelated ways at the same moment, check the disk before debugging
+any of them.
+
 ---
 
 ## Scope change, spec v3.0

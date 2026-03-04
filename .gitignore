@@ -11,6 +11,10 @@ summary.rtf
 results/**/records.jsonl
 results/**/*.log
 
+# Smoke runs use toy durations and a single repetition, so they cannot support a
+# confidence interval and must never be mistaken for published data.
+results/smoke/
+
 project_spec.md
 writing_prompt.md
 CLAUDE.md

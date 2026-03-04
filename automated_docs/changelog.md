@@ -4,6 +4,50 @@ Notable changes to this project, newest first. Update this alongside any commit 
 
 Format per entry: `## YYYY-MM-DD — short title`, then a few bullets of what changed and why (link to the relevant roadmap release from `project_status.md` when applicable).
 
+## 2026-03-04 — Ship preparation, and two silent defects found by writing the docs
+
+- **A stalled worker could freeze the router's whole view of the fleet.** The
+  metrics poller walks workers one at a time and shares the proxy's HTTP client,
+  whose read timeout is measured in tens of seconds because a long generation is
+  healthy. A worker that accepted the connection and then said nothing held the
+  loop for a minute, and routing ran on load figures from a minute ago. The
+  metrics fetch now carries its own timeout of one poll interval. A regression
+  test stalls one worker and asserts the next is still read; it fails without the
+  fix.
+- **`--session-turns` did nothing and was recorded in every run manifest.** The
+  generator only ever builds one system message and one user question, and never
+  sends an `x-session-id` header. Any value above one described a workload that
+  did not happen. It is now refused rather than ignored. The consequence is that
+  the router's session affinity has never influenced a published number, and
+  `RESULTS.md` now says so instead of calling it merely unvalidated.
+- `docs/DESIGN.md`: the request path, six decisions with the cost of being wrong
+  for each, what breaks at 100 workers, and what the measurements changed about
+  the design. It records that the balance override degenerates to its absolute
+  condition whenever any worker is idle, which rarely matters at three workers
+  and would disable affinity fleet-wide at a hundred.
+- `make bench` now regenerates every published number and then the charts, in
+  about an hour, which is what the shipping exit criterion has always claimed it
+  did. `make bench-smoke` runs the same pipeline at toy settings in a few
+  minutes, into `results/smoke`, which is gitignored and marked not publishable.
+  The old quick run is `make bench-one`.
+- `scripts/plot.py` and four charts under `docs/charts`, redrawn from committed
+  data with no arguments. CDFs on a log tail axis rather than bar charts of
+  means, every run drawn behind its median, and intervals that contain zero
+  drawn as containing zero. The README now opens with one.
+- The compose stack was brought up and verified end to end: streaming
+  completions through the router, all four Prometheus targets up, and Grafana
+  serving the provisioned dashboard against live router metrics. Three things
+  had to be fixed. Four services building the same image tag raced inside
+  containerd and wedged the daemon, so only one service builds now. A missing
+  `.dockerignore` was uploading an 8.8GB build context. And bind-mounted config
+  files that iCloud had evicted fail to read inside the container with a
+  confusing deadlock error, which is documented in the compose header.
+- `LICENSE`, the Apache-2.0 text the manifests have claimed since R0.1.
+- The working-name caveat is gone from the README. The project is called
+  Warmpath.
+- Verified that the Hugging Face token that was briefly in `.env.example` never
+  entered git history. Every commit carrying that file has the placeholder.
+
 ## 2026-02-28 — Router overhead measured, and the compose stack
 
 - `scripts/overhead.sh` and `make overhead` measure what the router costs, by

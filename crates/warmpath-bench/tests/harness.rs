@@ -97,7 +97,16 @@ fn config(target: SocketAddr) -> RunConfig {
         session_turns: 1,
         max_tokens: 4,
         stream: true,
-        max_dispatch_lag_ms: 50.0,
+        // Generous on purpose. These tests are about what the harness computes,
+        // not about how fast the machine running them is, and a tight budget
+        // turns every one of them into a load test of whatever else the machine
+        // is doing. At a load average of thirty a 50ms budget failed the
+        // aggregation test while its real assertions were never in doubt.
+        //
+        // Nothing is lost by this. A generator that falls behind is caught by
+        // its own test, which sets the budget to zero so that no machine
+        // anywhere can meet it.
+        max_dispatch_lag_ms: 500.0,
     }
 }
 

@@ -9,9 +9,10 @@ approximate block index with in-flight reservation, polls each worker for queue
 depth and KV pressure, and chooses among six policies. Health checking, a single
 retry, and session affinity are in.
 
-R0.5 is the ship point. Its GPU half is blocked on renting hardware. Its other
-half is being worked through: the compose stack is written, and the router's own
-overhead is measured at the median and unresolvable at p99 on this machine.
+R0.5 is the ship point, and everything in it that does not need a GPU is done:
+the compose stack runs and is verified, one command regenerates every published
+number and its charts, the design document exists, and the repository carries its
+licence. What remains is the GPU half, which is blocked on renting hardware.
 
 ## Milestones
 
@@ -39,9 +40,10 @@ mock worker's agreement with the router is not evidence, since both are models
 written by the same person from the same idea. That comparison is an R0.5 exit
 criterion.
 
-Docker is not installed on this machine, so the `docker compose up` path is
-unverified. That is a real gap for R0.5, whose exit criterion is a stranger
-reproducing every number from a clean checkout.
+The `docker compose up` path has now been brought up and verified end to end:
+streaming completions through the router, all four Prometheus targets up, and
+Grafana serving the provisioned dashboard against live router metrics. What is
+left of the exit criterion is the GPU half.
 
 ## What's been accomplished
 
@@ -115,14 +117,8 @@ point at which the project is finished.
 6. Negative-results pass: at least one documented losing regime. Three are
    already in `RESULTS.md`, so this is mostly a matter of confirming they
    survive real workers.
-7. Verify the compose stack. `compose.yaml`, the `Dockerfile`, and Grafana
-   provisioning are written and the YAML parses, but nothing has been run,
-   because Docker is not installed on this machine. Treat it as unverified
-   until someone runs `docker compose up --build`.
-8. `docs/DESIGN.md` with alternatives considered and what would change at a
-   hundred workers. `automated_docs/architecture.md` already covers most of
-   this, so the open question is whether a second document earns its place or
-   the existing one is simply promoted.
+7. Re-run `make bench` on the real fleet and redraw the charts from it, so the
+   published numbers describe vLLM rather than a model of it.
 
 ## Open risks to watch
 

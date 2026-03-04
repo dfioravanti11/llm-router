@@ -5,7 +5,12 @@ OpenAI-compatible HTTP proxy that fronts N inference workers and picks the
 worker most likely to already hold a request's prompt prefix in its KV cache,
 subject to load and memory pressure.
 
-Working name. Expect it to change before a public release.
+![Time to first token by policy, even prefix popularity](docs/charts/even-ttft-tail.png)
+
+Time to first token against three mock workers, offered open loop at 60 requests
+a second. Every policy sees the same workload and the same seeds. The step near
+42ms is a cache miss, and the two cache-aware policies mostly stay left of it.
+Regenerate with `make bench`.
 
 ## Status
 
@@ -62,7 +67,10 @@ Not built yet: real vLLM, which is the whole of R0.5 and the ship point.
 | `config/warmpath.toml` | Router configuration |
 | `deploy/` | Prometheus scrape config, Grafana dashboard and provisioning |
 | `compose.yaml` | Router, three mock workers, Prometheus, Grafana |
+| `docs/DESIGN.md` | Decisions, their costs, and what breaks at 100 workers |
 | `Dockerfile` | Builds the router and the mock worker into one image |
+| `scripts/reproduce.sh` | Regenerates every published number, behind `make bench` |
+| `scripts/plot.py` | Redraws every chart from committed data |
 | `scripts/co-demo.sh` | The coordinated-omission comparison |
 | `scripts/policy-compare.sh` | Routing policies on one workload shape |
 | `scripts/policy-matrix.sh` | Every policy against every workload shape |
@@ -113,14 +121,22 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 ## Measuring it
 
-With a router already running, three open-loop runs and their confidence
-interval:
+Every number published in `RESULTS.md` regenerates from one command. It takes
+about an hour and starts and stops everything it needs:
 
 ```
 make bench
 ```
 
-Two comparisons that start and stop everything themselves:
+The same pipeline at toy settings, to check the machinery works before
+committing an hour to it. Output goes to `results/smoke` and is not publishable,
+since a single short run cannot support a confidence interval:
+
+```
+make bench-smoke
+```
+
+The pieces, if you want one on its own:
 
 ```
 make policy-matrix
@@ -130,7 +146,9 @@ make overhead
 
 Each run writes a directory under `results/` holding `report.json` (config,
 seed, git SHA, validity, latency summaries), `records.jsonl` (one line per
-request), and `percentiles.csv` (ready to plot).
+request), and `percentiles.csv` (ready to plot). Everything except the
+per-request record stream is committed, so the data behind every published
+number is in the repository.
 
 `warmpath-bench` works against any OpenAI-compatible endpoint, not just this
 router:
@@ -144,6 +162,12 @@ cargo run --release -p warmpath-bench -- run --target http://your-endpoint:8000
 `make check` runs the same gate as CI: format check, clippy with warnings
 denied, and the test suite.
 
+## Design
+
+`docs/DESIGN.md` covers the decisions, what each one costs if it is wrong, and
+what breaks at a hundred workers. `automated_docs/architecture.md` describes the
+structure as built.
+
 ## License
 
-Apache-2.0.
+Apache-2.0. See `LICENSE`.

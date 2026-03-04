@@ -211,9 +211,23 @@ pub async fn poll_workers(
 ) {
     let interval = Duration::from_millis(config.poll_interval_ms.max(50));
 
+    // The loop walks the fleet one worker at a time, so without a bound of its
+    // own a single slow worker delays every other worker's reading. The client
+    // is shared with the proxy, where a read timeout is measured in tens of
+    // seconds because a long generation is healthy. A worker that accepts the
+    // connection and then says nothing would therefore freeze the router's view
+    // of the whole fleet for that long, and routing would run on load figures
+    // from a minute ago.
+    //
+    // One poll interval is the bound, because a reading that arrives later than
+    // the next poll was due is worth nothing anyway. A worker that cannot answer
+    // in that time counts as a failed poll, and it still takes several in a row
+    // to eject it.
+    let timeout = interval;
+
     loop {
         for (endpoint, state) in endpoints.iter().zip(states.iter()) {
-            match fetch(&client, endpoint).await {
+            match fetch(&client, endpoint, timeout).await {
                 Ok(sample) => state.observe(sample, &config),
                 Err(error) => {
                     tracing::debug!(endpoint, error = %error, "worker metrics poll failed");
@@ -225,8 +239,12 @@ pub async fn poll_workers(
     }
 }
 
-async fn fetch(client: &reqwest::Client, endpoint: &str) -> anyhow::Result<WorkerSample> {
-    let response = client.get(endpoint).send().await?;
+async fn fetch(
+    client: &reqwest::Client,
+    endpoint: &str,
+    timeout: Duration,
+) -> anyhow::Result<WorkerSample> {
+    let response = client.get(endpoint).timeout(timeout).send().await?;
     anyhow::ensure!(
         response.status().is_success(),
         "metrics endpoint returned {}",
@@ -259,6 +277,78 @@ some_other_metric 42
             healthy_after: 2,
             ..HealthConfig::default()
         }
+    }
+
+    /// The poll loop walks the fleet one worker at a time, and it shares the
+    /// proxy's HTTP client, whose read timeout is measured in tens of seconds
+    /// because a long generation is healthy. A worker that accepts the
+    /// connection and then says nothing would freeze every other worker's
+    /// reading for that long, and the router would route on load figures from a
+    /// minute ago.
+    #[tokio::test]
+    async fn a_stalled_worker_does_not_freeze_the_rest_of_the_fleet() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // Accepts connections and never answers. Holding the streams matters,
+        // since dropping them would close the socket and end the stall.
+        let stalled = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_addr = stalled.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = stalled.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let answering = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let answering_addr = answering.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = answering.accept().await {
+                tokio::spawn(async move {
+                    let mut request = [0u8; 1024];
+                    let _ = stream.read(&mut request).await;
+                    let body = "vllm:num_requests_running 6\nvllm:num_requests_waiting 4\n";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        // A read timeout like the proxy's, which is the thing that makes the
+        // stall dangerous in the first place.
+        let client = reqwest::Client::builder()
+            .read_timeout(Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        let states = vec![
+            Arc::new(WorkerState::default()),
+            Arc::new(WorkerState::default()),
+        ];
+
+        // The stalled worker is first in the list, so the second one is only
+        // ever reached if the stall is bounded.
+        tokio::spawn(poll_workers(
+            client,
+            vec![
+                format!("http://{stalled_addr}/metrics"),
+                format!("http://{answering_addr}/metrics"),
+            ],
+            states.clone(),
+            health(),
+        ));
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        assert_eq!(
+            states[1].queue_depth(),
+            10,
+            "the answering worker was never read, so the stall blocked the loop"
+        );
     }
 
     #[test]

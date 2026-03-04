@@ -188,7 +188,10 @@ fn workload(target: SocketAddr, label: &str, prefix_pool: usize) -> RunConfig {
         session_turns: 1,
         max_tokens: 4,
         stream: true,
-        max_dispatch_lag_ms: 100.0,
+        // Generous for the same reason as in `harness.rs`: these tests are about
+        // where requests were routed, and a tight budget only measures how busy
+        // the machine is.
+        max_dispatch_lag_ms: 500.0,
     }
 }
 

@@ -81,7 +81,8 @@ struct RunArgs {
     #[arg(long, default_value_t = 0.0)]
     hot_prefix_share: f64,
 
-    /// Turns per session. One means every request is independent.
+    /// Turns per session. Only one is supported, since the generator has no
+    /// multi-turn workload yet. Anything else is refused rather than ignored.
     #[arg(long, default_value_t = 1)]
     session_turns: usize,
 
@@ -133,6 +134,24 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run(args: RunArgs) -> anyhow::Result<()> {
     anyhow::ensure!(args.runs > 0, "--runs must be at least 1");
+
+    // The workload builds one system message holding a shared prefix and one
+    // user question, and it never sends a session header. There is no code here
+    // that would make a second turn follow the first, so accepting a larger
+    // number would record a workload in the manifest that the run did not
+    // perform. That is the silent kind of wrong this project treats as its worst
+    // failure mode, so it is refused instead.
+    //
+    // Multi-turn and agentic replay live in Appendix A3 of the spec, closed
+    // until R0.5 ships. Session affinity in the router is therefore not
+    // exercised by any benchmark here, which `RESULTS.md` says out loud.
+    anyhow::ensure!(
+        args.session_turns == 1,
+        "--session-turns {} was asked for, and multi-turn workloads are not implemented. \
+         The generator only ever sends single-turn requests, so any other value would \
+         describe a run that did not happen.",
+        args.session_turns
+    );
 
     let mut reports = Vec::with_capacity(args.runs);
 

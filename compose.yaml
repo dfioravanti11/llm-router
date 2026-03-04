@@ -18,28 +18,45 @@
 #
 # Change the policy in config/warmpath-compose.toml and bring the router back up
 # to compare.
+#
+# On macOS, keep the checkout somewhere iCloud does not manage. When iCloud
+# evicts a file it leaves a `dataless` stub behind, and a host read quietly
+# pulls the contents back while a read from inside a container fails with
+# "resource deadlock avoided". Every config below arrives by bind mount, so the
+# router, Prometheus, and Grafana all die at startup when that happens.
+# `ls -lO` shows the flag and `brctl download <file>` clears it.
+
+# Everything below runs the same image, so it is built once and reused. Giving
+# all four services a `build:` section pointed at the same tag made compose
+# export four identical images at the same time, and containerd handed two of
+# them the same snapshot mount and died with an I/O error. Only worker-0 builds.
+# The rest say `never` so compose does not go hunting a registry for a tag that
+# only ever exists locally.
+x-worker: &worker
+  image: warmpath:local
+  pull_policy: never
+  command:
+    - warmpath-mock
+    - --bind=0.0.0.0:8001
+    # Small enough that a working set of ten 256-word prefixes does not fit in
+    # one worker, which is the regime cache-aware routing is for. See
+    # RESULTS.md.
+    - --cache-blocks=112
+    - --block-size=16
+    - --max-concurrency=32
+    - --ttft-ms=1
+    - --inter-token-ms=1
+    - --prefill-per-token-us=120
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+    interval: 2s
+    timeout: 2s
+    retries: 15
 
 services:
-  worker-0: &worker
+  worker-0:
+    <<: *worker
     build: .
-    image: warmpath:local
-    command:
-      - warmpath-mock
-      - --bind=0.0.0.0:8001
-      # Small enough that a working set of ten 256-word prefixes does not fit in
-      # one worker, which is the regime cache-aware routing is for. See
-      # RESULTS.md.
-      - --cache-blocks=112
-      - --block-size=16
-      - --max-concurrency=32
-      - --ttft-ms=1
-      - --inter-token-ms=1
-      - --prefill-per-token-us=120
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
-      interval: 2s
-      timeout: 2s
-      retries: 15
 
   worker-1:
     <<: *worker
@@ -48,8 +65,8 @@ services:
     <<: *worker
 
   router:
-    build: .
     image: warmpath:local
+    pull_policy: never
     command: ["warmpath", "--config", "/etc/warmpath/warmpath.toml"]
     ports:
       - "8080:8080"
