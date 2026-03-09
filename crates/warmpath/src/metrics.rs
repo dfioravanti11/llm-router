@@ -54,6 +54,15 @@ pub struct Metrics {
     registry: Registry,
     requests: Family<RequestLabels, Counter>,
     decisions: Family<DecisionLabels, Counter>,
+    /// What the router believed about the cache when it chose, in blocks.
+    ///
+    /// This pair is the router's own prediction, and it exists to be checked
+    /// against the worker's `prefix_cache_queries` and `prefix_cache_hits`,
+    /// which the router does not control. Without it the router grades its own
+    /// homework, since every other cache number here is either an input to the
+    /// decision or a copy of the worker's.
+    predicted_blocks: Family<WorkerLabels, Counter>,
+    predicted_hit_blocks: Family<WorkerLabels, Counter>,
     in_flight: Gauge,
     rejected: Counter,
     ttfb: Family<WorkerLabels, Histogram>,
@@ -88,6 +97,20 @@ impl Metrics {
             "routing_decisions",
             "Routing decisions, by chosen worker and the policy that chose it",
             decisions.clone(),
+        );
+
+        let predicted_blocks = Family::<WorkerLabels, Counter>::default();
+        registry.register(
+            "predicted_blocks",
+            "Prompt blocks the router routed, whether or not it expected a hit",
+            predicted_blocks.clone(),
+        );
+
+        let predicted_hit_blocks = Family::<WorkerLabels, Counter>::default();
+        registry.register(
+            "predicted_hit_blocks",
+            "Prompt blocks the router believed the chosen worker already held",
+            predicted_hit_blocks.clone(),
         );
 
         let in_flight = Gauge::default();
@@ -128,6 +151,8 @@ impl Metrics {
             registry,
             requests,
             decisions,
+            predicted_blocks,
+            predicted_hit_blocks,
             in_flight,
             rejected,
             ttfb,
@@ -171,6 +196,15 @@ impl Metrics {
         let chosen = self.decisions.get_or_create(&decision_labels).clone();
         let ttfb = self.ttfb.get_or_create(&worker_labels).clone();
         let e2e = self.e2e.get_or_create(&worker_labels).clone();
+        // Each handle is bound to its own `let` on purpose. `get_or_create`
+        // returns a read guard and takes a write lock when the label set is new,
+        // so several of them alive as temporaries in one expression deadlock the
+        // thread.
+        let predicted_blocks = self.predicted_blocks.get_or_create(&worker_labels).clone();
+        let predicted_hit_blocks = self
+            .predicted_hit_blocks
+            .get_or_create(&worker_labels)
+            .clone();
 
         WorkerMetrics {
             completed,
@@ -180,6 +214,8 @@ impl Metrics {
             ttfb,
             e2e,
             in_flight: self.in_flight.clone(),
+            predicted_blocks,
+            predicted_hit_blocks,
         }
     }
 
@@ -205,12 +241,25 @@ pub struct WorkerMetrics {
     ttfb: Histogram,
     e2e: Histogram,
     in_flight: Gauge,
+    predicted_blocks: Counter,
+    predicted_hit_blocks: Counter,
 }
 
 impl WorkerMetrics {
     pub fn record_dispatch(&self) {
         self.chosen.inc();
         self.in_flight.inc();
+    }
+
+    /// What the router expected of the cache for this request.
+    ///
+    /// `blocks` is the whole prompt in blocks and `matched` is the part the
+    /// chosen worker was believed to hold. Recorded at dispatch rather than at
+    /// completion, because it is a statement about the decision and stays true
+    /// whatever the response turns out to be.
+    pub fn record_prediction(&self, blocks: usize, matched: usize) {
+        self.predicted_blocks.inc_by(blocks as u64);
+        self.predicted_hit_blocks.inc_by(matched.min(blocks) as u64);
     }
 
     pub fn record_first_byte(&self, seconds: f64) {
@@ -237,6 +286,51 @@ impl WorkerMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The router's prediction has to leave the process, or the comparison
+    /// against the worker's own counters at R0.5 has nothing to compare.
+    #[test]
+    fn the_predicted_hit_rate_is_exported_per_worker() {
+        let metrics = Metrics::new();
+        let warm = metrics.for_worker("w0", "prefix-affinity-balanced");
+        let cold = metrics.for_worker("w1", "prefix-affinity-balanced");
+
+        // Twenty blocks, eighteen of them believed to be held already.
+        warm.record_prediction(20, 18);
+        // Same prompt shape, nothing believed to be held.
+        cold.record_prediction(20, 0);
+
+        let encoded = metrics.encode().expect("registry should encode");
+
+        assert!(
+            encoded.contains(r#"warmpath_predicted_blocks_total{worker="w0"} 20"#),
+            "{encoded}"
+        );
+        assert!(
+            encoded.contains(r#"warmpath_predicted_hit_blocks_total{worker="w0"} 18"#),
+            "{encoded}"
+        );
+        assert!(
+            encoded.contains(r#"warmpath_predicted_hit_blocks_total{worker="w1"} 0"#),
+            "{encoded}"
+        );
+    }
+
+    /// A prediction can never claim more hits than the prompt had blocks, since
+    /// the pair is read as a ratio and a ratio above one would be nonsense.
+    #[test]
+    fn a_prediction_cannot_exceed_the_prompt() {
+        let metrics = Metrics::new();
+        let worker = metrics.for_worker("w0", "prefix-affinity");
+
+        worker.record_prediction(4, 9);
+
+        let encoded = metrics.encode().expect("registry should encode");
+        assert!(
+            encoded.contains(r#"warmpath_predicted_hit_blocks_total{worker="w0"} 4"#),
+            "{encoded}"
+        );
+    }
 
     #[test]
     fn encoded_output_carries_the_registered_families() {

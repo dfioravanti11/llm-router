@@ -68,6 +68,7 @@ Not built yet: real vLLM, which is the whole of R0.5 and the ship point.
 | `deploy/` | Prometheus scrape config, Grafana dashboard and provisioning |
 | `compose.yaml` | Router, three mock workers, Prometheus, Grafana |
 | `docs/DESIGN.md` | Decisions, their costs, and what breaks at 100 workers |
+| `docs/GPU-RUNBOOK.md` | The R0.5 validation session, in the order to do it |
 | `Dockerfile` | Builds the router and the mock worker into one image |
 | `scripts/reproduce.sh` | Regenerates every published number, behind `make bench` |
 | `scripts/plot.py` | Redraws every chart from committed data |
@@ -75,6 +76,7 @@ Not built yet: real vLLM, which is the whole of R0.5 and the ship point.
 | `scripts/policy-compare.sh` | Routing policies on one workload shape |
 | `scripts/policy-matrix.sh` | Every policy against every workload shape |
 | `scripts/overhead.sh` | What the router itself costs, against one worker |
+| `scripts/validate-hit-rate.sh` | Router's predicted hit rate against the workers' own |
 | `scripts/fetch-model.sh` | Downloads the model tokenizer and chat template |
 
 ## Running it
@@ -166,7 +168,8 @@ denied, and the test suite.
 
 `docs/DESIGN.md` covers the decisions, what each one costs if it is wrong, and
 what breaks at a hundred workers. `automated_docs/architecture.md` describes the
-structure as built.
+structure as built. `docs/GPU-RUNBOOK.md` is the validation session against real
+vLLM, which is the one thing left before this is finished.
 
 ## License
 

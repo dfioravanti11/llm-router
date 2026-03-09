@@ -112,6 +112,14 @@ pub async fn proxy(
 
     let dispatched_at = Instant::now();
     choice.metrics.record_dispatch();
+    // What the router expected of the cache, recorded so it can be checked
+    // against what the worker reports. A prompt with no blocks contributes
+    // nothing either way rather than counting as a miss.
+    if let Some(fingerprint) = fingerprint.as_ref() {
+        choice
+            .metrics
+            .record_prediction(fingerprint.block_count(), choice.decision.matched_blocks);
+    }
     let mut choice = choice;
     let mut worker = worker;
 
@@ -158,6 +166,15 @@ pub async fn proxy(
             );
 
             choice.metrics.record_dispatch();
+            // A retry is chosen by queue depth alone, without consulting the
+            // index, so the router is predicting a full miss here and says so.
+            // Leaving it out instead would let the denominator drift away from
+            // the number of prompts the workers actually saw.
+            if let Some(fingerprint) = fingerprint.as_ref() {
+                choice
+                    .metrics
+                    .record_prediction(fingerprint.block_count(), choice.decision.matched_blocks);
+            }
             match state
                 .pool
                 .client()

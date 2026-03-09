@@ -4,6 +4,27 @@ Notable changes to this project, newest first. Update this alongside any commit 
 
 Format per entry: `## YYYY-MM-DD — short title`, then a few bullets of what changed and why (link to the relevant roadmap release from `project_status.md` when applicable).
 
+## 2026-03-09 — The router now records what it predicted
+
+- **The R0.5 validation gate could not have been run.** The milestone rests on
+  comparing the router's predicted prefix cache hit rate against what the
+  workers report, and the router recorded no prediction anywhere. It exports
+  `warmpath_predicted_blocks_total` and `warmpath_predicted_hit_blocks_total`
+  per worker now, written at dispatch, since a prediction is a statement about
+  the decision rather than about how the response turned out.
+- A retry is chosen on queue depth alone without consulting the index, so it
+  records a predicted full miss rather than nothing. Leaving it out would let
+  the denominator drift away from the prompts the workers actually saw.
+- `make validate-hit-rate` compares the two and prints the gap with a verdict.
+  Against the mock fleet it reports an exact zero on identical block counts,
+  which shows only that the plumbing carries numbers: the mock hashes blocks
+  with the same `warmpath-core` code the router does, so it is one calculation
+  performed twice.
+- `docs/GPU-RUNBOOK.md`, the validation session in the order it should be done,
+  including the point that renting hardware does not on its own resolve the p99
+  overhead question. That needs the load generator on a machine doing nothing
+  else.
+
 ## 2026-03-04 — Ship preparation, and two silent defects found by writing the docs
 
 - **A stalled worker could freeze the router's whole view of the fleet.** The

@@ -1,4 +1,4 @@
-.PHONY: help build test fmt fmt-check lint check fetch-model run-mock run bench bench-smoke bench-one co-demo policy-compare policy-matrix overhead clean
+.PHONY: help build test fmt fmt-check lint check fetch-model run-mock run bench bench-smoke bench-one co-demo policy-compare policy-matrix overhead validate-hit-rate clean
 
 help:
 	@echo "build      compile the workspace"
@@ -20,6 +20,7 @@ help:
 	@echo "policy-compare  routing policies on one workload shape"
 	@echo "policy-matrix   every policy against every workload shape"
 	@echo "overhead   what the router itself costs, against one worker"
+	@echo "validate-hit-rate  the router prediction against the workers own counters"
 
 build:
 	cargo build --workspace
@@ -76,6 +77,10 @@ policy-matrix:
 
 overhead:
 	./scripts/overhead.sh
+
+# Needs a fleet already serving traffic. See docs/GPU-RUNBOOK.md.
+validate-hit-rate:
+	./scripts/validate-hit-rate.sh
 
 clean:
 	cargo clean

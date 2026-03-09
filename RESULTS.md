@@ -366,6 +366,34 @@ worth reading.
 - Anything on real hardware. R0.5.
 - The router's predicted hit rate against a worker's own reported hit rate,
   where the worker is vLLM rather than a model of vLLM. R0.5.
+
+  The router now exports what it predicted, as
+  `warmpath_predicted_hit_blocks_total` over `warmpath_predicted_blocks_total`,
+  and `make validate-hit-rate` compares it against the workers' own
+  `vllm:prefix_cache_hits_total` over `vllm:prefix_cache_queries_total`. Until
+  now the router recorded no prediction at all, so the comparison this whole
+  milestone rests on had nothing to compare.
+
+  Against the mock fleet it reports an exact zero gap on identical block counts,
+  87.34% either way. That is not reassurance and it is not a result. The mock
+  computes its block hashes with the same `warmpath-core` code the router uses,
+  so the two counters are one calculation performed twice, and an exact match
+  shows only that the plumbing carries numbers. vLLM will be the first
+  independent opinion this project has had.
+
+  The router now exports what it predicted, as
+  `warmpath_predicted_hit_blocks_total` over `warmpath_predicted_blocks_total`,
+  and `make validate-hit-rate` compares it against the workers' own
+  `vllm:prefix_cache_hits_total` over `vllm:prefix_cache_queries_total`. Until
+  now the router recorded no prediction at all, so the comparison the whole
+  milestone rests on had nothing to compare.
+
+  Against the mock fleet it reports an exact zero gap on identical block counts,
+  87.34% either way. That is not reassurance and it is not a result. The mock
+  computes its block hashes with the same `warmpath-core` code the router uses,
+  so the two counters are one calculation performed twice, and an exact match
+  shows only that the plumbing carries numbers. vLLM will be the first
+  independent opinion this project has had.
 - The router's added latency at p99. Measured above and unresolved, because the
   noise floor of one laptop running all three processes is larger than the
   quantity. Needs separate quiet machines, which is R0.5.
