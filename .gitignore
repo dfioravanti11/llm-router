@@ -1,4 +1,5 @@
 /target
+.cargo/
 .env
 .cache
 summary.rtf
