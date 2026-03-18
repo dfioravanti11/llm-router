@@ -1,4 +1,6 @@
 /target
+# Machine specific: it points the target directory at an absolute path on
+# one person's disk, so it must never reach a checkout on another machine.
 .cargo/
 .env
 .cache

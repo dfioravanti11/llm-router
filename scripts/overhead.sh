@@ -35,6 +35,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# shellcheck source=scripts/bin-dir.sh
+. "$(dirname "$0")/bin-dir.sh"
+BIN=$(resolve_bin_dir)
+
 OUT=${OUT:-results/overhead}
 RUNS=${RUNS:-5}
 DURATION=${DURATION:-35}
@@ -83,7 +87,7 @@ stop_all() {
 trap stop_all EXIT
 
 start_worker() {
-  ./target/release/warmpath-mock \
+  "${BIN}/warmpath-mock" \
     --bind "127.0.0.1:${MOCK_PORT}" \
     --ttft-ms 0 --inter-token-ms 0 \
     --max-concurrency 32 \
@@ -121,7 +125,7 @@ name = "w0"
 url = "http://127.0.0.1:${MOCK_PORT}"
 TOML
 
-  ./target/release/warmpath --config "$config" >> "${OUT}/router.log" 2>&1 &
+  "${BIN}/warmpath" --config "$config" >> "${OUT}/router.log" 2>&1 &
   ROUTER_PID=$!
   disown "$ROUTER_PID" 2>/dev/null || true
 }
@@ -155,7 +159,7 @@ run_arm() {
     target="http://127.0.0.1:${ROUTER_PORT}"
   fi
 
-  ./target/release/warmpath-bench run \
+  "${BIN}/warmpath-bench" run \
     --target "$target" \
     --rate "$RATE" --duration "$DURATION" --warmup "$WARMUP" \
     --runs 1 --seed "$((200 + repetition))" --settle 0 \
@@ -189,7 +193,7 @@ for repetition in $(seq 1 "$RUNS"); do
 done
 
 for arm in $ARMS; do
-  ./target/release/warmpath-bench aggregate \
+  "${BIN}/warmpath-bench" aggregate \
     "${OUT}/${arm}"/*/ --out "${OUT}/${arm}/campaign.json" > /dev/null
 done
 

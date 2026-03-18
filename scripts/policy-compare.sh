@@ -18,6 +18,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# shellcheck source=scripts/bin-dir.sh
+. "$(dirname "$0")/bin-dir.sh"
+BIN=$(resolve_bin_dir)
+
 OUT=${OUT:-results/policy-compare}
 RUNS=${RUNS:-3}
 # 60/s over a 30s measurement window across 3 runs is about 5,400 measured
@@ -94,6 +98,27 @@ esac
 MOCK_BASE_PORT=${MOCK_BASE_PORT:-19001}
 ROUTER_PORT=${ROUTER_PORT:-19080}
 
+# Point this at real inference servers and no mock workers are started:
+#
+#   WORKER_URLS="http://10.0.0.4:8000 http://10.0.0.5:8000" \
+#   MODEL=Qwen/Qwen3-1.7B ./scripts/policy-matrix.sh
+#
+# The model name has to be one the servers will answer to. vLLM rejects a
+# request whose model field it does not recognise, and the default here is the
+# mock's name.
+MODEL=${MODEL:-mock-model}
+EXTERNAL_WORKERS=0
+if [ -n "${WORKER_URLS:-}" ]; then
+  EXTERNAL_WORKERS=1
+  # No `readarray` here: macOS ships bash 3.2.
+  WORKER_URL_LIST=()
+  for url in $WORKER_URLS; do
+    WORKER_URL_LIST+=("$url")
+  done
+  WORKERS=${#WORKER_URL_LIST[@]}
+  echo "using ${WORKERS} external workers, model ${MODEL}"
+fi
+
 # The model's own tokenizer and chat template, when they have been fetched.
 # Both the router and the workers must use the same one, or they are cutting
 # blocks at different boundaries and describing different experiments.
@@ -128,13 +153,29 @@ trap stop_all EXIT
 
 worker_toml=""
 for index in $(seq 0 $((WORKERS - 1))); do
-  port=$((MOCK_BASE_PORT + index))
-  worker_toml+=$'\n[[workers]]\nname = "w'"${index}"$'"\nurl = "http://127.0.0.1:'"${port}"$'"\n'
+  if [ "$EXTERNAL_WORKERS" -eq 1 ]; then
+    worker_url="${WORKER_URL_LIST[$index]}"
+  else
+    worker_url="http://127.0.0.1:$((MOCK_BASE_PORT + index))"
+  fi
+  worker_toml+=$'\n[[workers]]\nname = "w'"${index}"$'"\nurl = "'"${worker_url}"$'"\n'
 done
 
+# The first worker, whichever kind it is, is the one the readiness loop waits on.
+if [ "$EXTERNAL_WORKERS" -eq 1 ]; then
+  FIRST_WORKER_URL="${WORKER_URL_LIST[0]}"
+else
+  FIRST_WORKER_URL="http://127.0.0.1:${MOCK_BASE_PORT}"
+fi
+
 start_workers() {
+  # External servers are somebody else's to run. Each arm still needs to begin
+  # with an empty cache, which is what `reset_worker_caches` is for.
+  if [ "$EXTERNAL_WORKERS" -eq 1 ]; then
+    return 0
+  fi
   for index in $(seq 0 $((WORKERS - 1))); do
-    ./target/release/warmpath-mock \
+    "${BIN}/warmpath-mock" \
       --bind "127.0.0.1:$((MOCK_BASE_PORT + index))" \
       --ttft-ms 1 --inter-token-ms "$INTER_TOKEN_MS" \
       --max-concurrency "$WORKER_CONCURRENCY" \
@@ -170,13 +211,13 @@ poll_interval_ms = 100
 ${ROUTER_MODEL_TOML}${worker_toml}
 TOML
 
-  ./target/release/warmpath --config "$config" >> "${OUT}/router.log" 2>&1 &
+  "${BIN}/warmpath" --config "$config" >> "${OUT}/router.log" 2>&1 &
   ROUTER_PID=$!
   disown "$ROUTER_PID" 2>/dev/null || true
 
   for _ in $(seq 1 60); do
     if curl -sf "http://127.0.0.1:${ROUTER_PORT}/health" > /dev/null \
-      && curl -sf "http://127.0.0.1:${MOCK_BASE_PORT}/health" > /dev/null; then
+      && curl -sf "${FIRST_WORKER_URL}/health" > /dev/null; then
       rm -f "$config"
       return 0
     fi
@@ -184,6 +225,33 @@ TOML
   done
   echo "router or workers did not come up for ${policy}; see ${OUT}/router.log" >&2
   exit 1
+}
+
+# Each arm has to start from an empty cache, or it inherits whatever the
+# previous policy left warm and the comparison measures the order the arms ran
+# in. With mock workers this is free, since they are started fresh per arm.
+# Real servers keep running, so ask them to drop the cache instead.
+reset_worker_caches() {
+  local url
+  for url in ${WORKER_URL_LIST[@]+"${WORKER_URL_LIST[@]}"}; do
+    if ! curl -sf -X POST "${url}/reset_prefix_cache" -o /dev/null 2>/dev/null; then
+      echo "WARNING: ${url} did not accept /reset_prefix_cache. This arm starts" >&2
+      echo "         with whatever the previous one left cached, and the run is" >&2
+      echo "         not comparable. Restart the servers between arms instead." >&2
+    fi
+  done
+}
+
+# vLLM's counters run for the life of the process, so an arm's own figures are
+# the difference across it. The mock is restarted per arm and needs no such care.
+snapshot_worker_counters() {
+  local out=$1
+  local url
+  : > "$out"
+  for url in ${WORKER_URL_LIST[@]+"${WORKER_URL_LIST[@]}"}; do
+    curl -sf "${url}/metrics" >> "$out" 2>/dev/null || true
+    echo "### END OF WORKER ###" >> "$out"
+  done
 }
 
 policy_list() {
@@ -205,12 +273,17 @@ for repetition in $(seq 1 "$RUNS"); do
     # Fresh workers per arm: every policy starts from an empty cache, and the
     # warmup window absorbs the cold start.
     start_workers
+    if [ "$EXTERNAL_WORKERS" -eq 1 ]; then
+      reset_worker_caches
+      snapshot_worker_counters "${OUT}/.counters-before"
+    fi
     start_router "$policy"
 
-    ./target/release/warmpath-bench run \
+    "${BIN}/warmpath-bench" run \
       --target "http://127.0.0.1:${ROUTER_PORT}" \
       --rate "$RATE" --duration "$DURATION" --warmup "$WARMUP" \
       --runs 1 --seed "$((100 + repetition))" --settle 0 \
+      --model "$MODEL" \
       --prompt-words 24 --max-tokens "$MAX_TOKENS" \
       --shared-prefix-words "$PREFIX_WORDS" --prefix-pool "$PREFIX_POOL" \
       --hot-prefix-share "$HOT_SHARE" \
@@ -219,11 +292,24 @@ for repetition in $(seq 1 "$RUNS"); do
       --out "${OUT}/${policy}"
 
     # The workers' own view, which is the number the router does not control.
-    # Counters cover this arm alone, because these workers started with it.
-    for index in $(seq 0 $((WORKERS - 1))); do
-      curl -s "http://127.0.0.1:$((MOCK_BASE_PORT + index))/debug/stats"
-      echo
-    done > "${OUT}/${policy}/worker-stats-${repetition}.jsonl"
+    if [ "$EXTERNAL_WORKERS" -eq 1 ]; then
+      # Real servers: this arm's figures are the difference across it, and the
+      # per-worker request counts come from the router, whose own counters do
+      # start at zero here because it is restarted for every arm.
+      snapshot_worker_counters "${OUT}/.counters-after"
+      curl -sf "http://127.0.0.1:${ROUTER_PORT}/metrics" \
+        > "${OUT}/.router-metrics" 2>/dev/null || true
+      python3 scripts/worker-stats.py \
+        "${OUT}/.counters-before" "${OUT}/.counters-after" "${OUT}/.router-metrics" \
+        > "${OUT}/${policy}/worker-stats-${repetition}.jsonl"
+      rm -f "${OUT}/.counters-before" "${OUT}/.counters-after" "${OUT}/.router-metrics"
+    else
+      # Counters cover this arm alone, because these workers started with it.
+      for index in $(seq 0 $((WORKERS - 1))); do
+        curl -s "http://127.0.0.1:$((MOCK_BASE_PORT + index))/debug/stats"
+        echo
+      done > "${OUT}/${policy}/worker-stats-${repetition}.jsonl"
+    fi
 
     stop_all
     sleep 0.5
@@ -233,7 +319,7 @@ done
 echo
 echo "=== ${SHAPE} workload ==="
 for policy in $POLICIES; do
-  ./target/release/warmpath-bench aggregate \
+  "${BIN}/warmpath-bench" aggregate \
     "${OUT}/${policy}"/*/ --out "${OUT}/${policy}/campaign.json" > /dev/null
 done
 

@@ -4,6 +4,29 @@ Notable changes to this project, newest first. Update this alongside any commit 
 
 Format per entry: `## YYYY-MM-DD — short title`, then a few bullets of what changed and why (link to the relevant roadmap release from `project_status.md` when applicable).
 
+## 2026-03-18 — The benchmark scripts can target a real fleet
+
+- **The comparison scripts could only ever test mock workers.** They started
+  their own and hardcoded the addresses, so the R0.5 plan to re-run the policy
+  matrix against vLLM had no way to express it. `WORKER_URLS` now points them at
+  servers they do not manage, and `MODEL` sets the model name, which matters
+  because vLLM rejects a request naming a model it does not serve and the
+  default here is the mock's name.
+- Two things follow from the servers outliving the run. Each arm asks every
+  worker to drop its prefix cache first, since otherwise a policy inherits
+  whatever the previous one left warm and the comparison measures the order the
+  arms ran in. A worker that refuses says so loudly rather than quietly
+  producing a number. And each arm's cache figures are the difference measured
+  across it, because vLLM's counters run for the life of the process.
+- `scripts/worker-stats.py` reconstructs the per-arm stats file from Prometheus
+  text, taking request counts from the router, whose counters do start at zero
+  per arm because it is restarted for each one.
+- **Every benchmark script was broken on this machine.** They all invoked
+  `./target/release/...`, and `.cargo/config.toml` now moves the target
+  directory off the synced path. They ask cargo where it put the binaries now.
+- `docs/GPU-RUNBOOK.md` said to run `make bench` against the real fleet, which
+  would have started mock workers and measured nothing. Corrected.
+
 ## 2026-03-09 — The router now records what it predicted
 
 - **The R0.5 validation gate could not have been run.** The milestone rests on

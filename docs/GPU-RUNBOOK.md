@@ -87,12 +87,27 @@ had.
 
 ## 4. Re-run the comparisons on real workers
 
+`make bench` starts its own mock workers, so it is not the command here. Point
+the comparison at the real ones instead, from the load generator machine:
+
 ```
-make bench
+WORKER_URLS="http://10.0.0.4:8000 http://10.0.0.5:8000" \
+MODEL=Qwen/Qwen3-1.7B \
+WORKERS=2 ./scripts/policy-matrix.sh
 ```
 
-About an hour against mocks and longer against real engines, since decode is no
-longer simulated. It regenerates every published number and redraws the charts.
+The model name has to be one vLLM will answer to, since it rejects a request
+whose model field it does not recognise, and the default is the mock's name.
+
+Two things happen differently against real servers. Each arm asks every worker
+to drop its prefix cache first, because the servers keep running between arms
+and would otherwise hand the next policy a cache the previous one warmed. If a
+worker refuses that request the script says so loudly, and the run is not
+comparable. And each arm's cache figures are measured as the difference across
+it, since vLLM's counters run for the life of the process.
+
+Expect this to take longer than against mocks, since decode is no longer
+simulated. Redraw the charts afterwards with `python3 scripts/plot.py`.
 
 Expect the numbers to move. Real prefill is far more expensive than the mock's
 model of it, which should make cache-aware routing look better on the median,

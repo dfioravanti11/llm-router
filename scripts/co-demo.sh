@@ -15,6 +15,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# shellcheck source=scripts/bin-dir.sh
+. "$(dirname "$0")/bin-dir.sh"
+BIN=$(resolve_bin_dir)
+
 OUT=${OUT:-results/co-demo}
 DURATION=${DURATION:-30}
 WARMUP=${WARMUP:-5}
@@ -56,14 +60,14 @@ TOML
 # A persistently overloaded open-loop system has no steady state, so its
 # latency grows with however long the run lasted, and the number stops being a
 # property of the system.
-./target/release/warmpath-mock \
+"${BIN}/warmpath-mock" \
   --bind "127.0.0.1:${MOCK_PORT}" \
   --ttft-ms 10 --inter-token-ms 5 --max-concurrency 2 \
   > "${OUT}/mock.log" 2>&1 &
 MOCK_PID=$!
 disown "$MOCK_PID" 2>/dev/null || true
 
-./target/release/warmpath --config "$CONFIG" > "${OUT}/router.log" 2>&1 &
+"${BIN}/warmpath" --config "$CONFIG" > "${OUT}/router.log" 2>&1 &
 ROUTER_PID=$!
 disown "$ROUTER_PID" 2>/dev/null || true
 
@@ -97,12 +101,12 @@ BENCH_ARGS=(
 
 echo
 echo "=== open loop, ${RATE} arrivals per second ==="
-./target/release/warmpath-bench run "${BENCH_ARGS[@]}" \
+"${BIN}/warmpath-bench" run "${BENCH_ARGS[@]}" \
   --rate "$RATE" --max-dispatch-lag-ms 100 --out "${OUT}/open-loop"
 
 echo
 echo "=== closed loop, ${CONCURRENCY} concurrent callers ==="
-./target/release/warmpath-bench run "${BENCH_ARGS[@]}" \
+"${BIN}/warmpath-bench" run "${BENCH_ARGS[@]}" \
   --mode closed-loop --concurrency "$CONCURRENCY" --out "${OUT}/closed-loop"
 
 echo
