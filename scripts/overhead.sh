@@ -56,6 +56,23 @@ CACHE_BLOCKS=${CACHE_BLOCKS:-4096}
 MOCK_PORT=${MOCK_PORT:-19001}
 ROUTER_PORT=${ROUTER_PORT:-19080}
 
+# Point this at a real inference server and no mock worker is started:
+#
+#   WORKER_URL=http://10.0.0.4:8000 MODEL=Qwen/Qwen3-1.7B ./scripts/overhead.sh
+#
+# One worker is all this measurement needs, because it compares a request that
+# goes through the router against the same request sent straight to the same
+# worker. It answers what the router costs, and it does not need a fleet.
+MODEL=${MODEL:-mock-model}
+if [ -n "${WORKER_URL:-}" ]; then
+  EXTERNAL_WORKER=1
+  WORKER_BASE="$WORKER_URL"
+  echo "using the external worker at ${WORKER_BASE}, model ${MODEL}"
+else
+  EXTERNAL_WORKER=0
+  WORKER_BASE="http://127.0.0.1:${MOCK_PORT}"
+fi
+
 MODEL_DIR=${MODEL_DIR:-.cache/qwen3-1.7b}
 if [ -f "${MODEL_DIR}/tokenizer.json" ]; then
   MOCK_MODEL_ARGS=(--model-dir "$MODEL_DIR")
@@ -87,6 +104,10 @@ stop_all() {
 trap stop_all EXIT
 
 start_worker() {
+  # Somebody else runs the real one.
+  if [ "$EXTERNAL_WORKER" -eq 1 ]; then
+    return 0
+  fi
   "${BIN}/warmpath-mock" \
     --bind "127.0.0.1:${MOCK_PORT}" \
     --ttft-ms 0 --inter-token-ms 0 \
@@ -122,7 +143,7 @@ poll_interval_ms = 100
 ${ROUTER_MODEL_TOML}
 [[workers]]
 name = "w0"
-url = "http://127.0.0.1:${MOCK_PORT}"
+url = "${WORKER_BASE}"
 TOML
 
   "${BIN}/warmpath" --config "$config" >> "${OUT}/router.log" 2>&1 &
@@ -149,10 +170,10 @@ run_arm() {
   local arm=$1 repetition=$2 target
 
   start_worker
-  wait_for "http://127.0.0.1:${MOCK_PORT}/health"
+  wait_for "${WORKER_BASE}/health"
 
   if [ "$arm" = "direct" ]; then
-    target="http://127.0.0.1:${MOCK_PORT}"
+    target="${WORKER_BASE}"
   else
     start_router "$arm"
     wait_for "http://127.0.0.1:${ROUTER_PORT}/health"
@@ -161,6 +182,7 @@ run_arm() {
 
   "${BIN}/warmpath-bench" run \
     --target "$target" \
+    --model "$MODEL" \
     --rate "$RATE" --duration "$DURATION" --warmup "$WARMUP" \
     --runs 1 --seed "$((200 + repetition))" --settle 0 \
     --prompt-words 24 --max-tokens 1 \
