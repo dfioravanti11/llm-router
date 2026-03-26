@@ -13,6 +13,12 @@
 #   the router     warmpath_predicted_hit_blocks_total / warmpath_predicted_blocks_total
 #   the worker     vllm:prefix_cache_hits_total / vllm:prefix_cache_queries_total
 #
+# The two count in different units. The router counts blocks. vLLM counts tokens,
+# which its own help text says and which is easy to miss. Both are read here as
+# a fraction, and a fraction does not care about the unit, so the rates compare
+# directly. The totals do not, so the router's are multiplied by the block size
+# before the two are checked against each other.
+#
 # The second pair the router does not control and cannot talk itself into. A
 # large gap is a real finding and gets published either way, which is the whole
 # point of the exercise.
@@ -36,6 +42,9 @@ cd "$(dirname "$0")/.."
 ROUTER=${ROUTER:-http://127.0.0.1:8080}
 WORKERS=${WORKERS:-}
 OUT=${OUT:-results/hit-rate}
+# Must match `[index] block_size` in the router config and `--block-size` on the
+# workers. Used only to compare the two totals, never the two rates.
+BLOCK_SIZE=${BLOCK_SIZE:-16}
 
 if [ -z "$WORKERS" ]; then
   echo "WORKERS is empty. Set it to the worker base URLs, space separated." >&2
@@ -64,7 +73,7 @@ for worker in $WORKERS; do
   index=$((index + 1))
 done
 
-python3 - "$router_metrics" "${worker_files[@]}" <<'PY'
+python3 - "$BLOCK_SIZE" "$router_metrics" "${worker_files[@]}" <<'PY'
 import sys
 
 
@@ -93,7 +102,8 @@ def totals(path, names):
     return found
 
 
-router_path, worker_paths = sys.argv[1], sys.argv[2:]
+block_size = int(sys.argv[1])
+router_path, worker_paths = sys.argv[2], sys.argv[3:]
 
 # The registry prefixes every name with `warmpath` and counters get a `_total`
 # suffix in the exposition.
@@ -147,8 +157,22 @@ print("prefix cache hit rate")
 print(f"  router predicted   {predicted_rate:7.2%}   "
       f"over {predicted_blocks:,.0f} blocks routed")
 print(f"  workers reported   {actual_rate:7.2%}   "
-      f"over {worker_queries:,.0f} blocks looked up")
+      f"over {worker_queries:,.0f} tokens looked up")
 print(f"  gap                {gap:+7.2%}")
+print()
+
+# Same traffic, different units. If these two totals disagree by much, the two
+# sides did not see the same requests, and comparing their rates means nothing.
+# A few percent is normal: the router counts a part-used block as a whole one.
+router_tokens = predicted_blocks * block_size
+drift = abs(worker_queries - router_tokens) / router_tokens
+print(f"  the router routed {router_tokens:,.0f} tokens by its own count, and the")
+print(f"  workers looked up {worker_queries:,.0f}, a difference of {drift:.1%}.")
+if drift > 0.10:
+    print()
+    print("  WARNING: those totals are too far apart to be the same traffic.")
+    print("  Check that the block size matches on both sides, and that no other")
+    print("  client is sending requests to these workers.")
 print()
 
 # The two counters do not count identical things, and pretending otherwise
