@@ -233,13 +233,49 @@ TOML
 # Real servers keep running, so ask them to drop the cache instead.
 reset_worker_caches() {
   local url
+
+  # Some engines expose no way to drop the cache. vLLM hides its endpoint behind
+  # a dev flag, and older builds do not have it at all. WORKER_RESET_CMD is the
+  # way out: give it a command that restarts the servers, and it runs instead.
+  #
+  #   WORKER_RESET_CMD="sudo docker restart vllm-0 vllm-1"
+  if [ -n "${WORKER_RESET_CMD:-}" ]; then
+    echo "resetting workers with: ${WORKER_RESET_CMD}"
+    if ! eval "$WORKER_RESET_CMD"; then
+      echo "WORKER_RESET_CMD failed, so this arm would start with a warm cache" >&2
+      exit 1
+    fi
+    wait_for_workers
+    return 0
+  fi
+
   for url in ${WORKER_URL_LIST[@]+"${WORKER_URL_LIST[@]}"}; do
     if ! curl -sf -X POST "${url}/reset_prefix_cache" -o /dev/null 2>/dev/null; then
       echo "WARNING: ${url} did not accept /reset_prefix_cache. This arm starts" >&2
       echo "         with whatever the previous one left cached, and the run is" >&2
-      echo "         not comparable. Restart the servers between arms instead." >&2
+      echo "         not comparable. Set WORKER_RESET_CMD to restart the servers" >&2
+      echo "         instead." >&2
     fi
   done
+}
+
+# A restarted inference server takes far longer to answer than a mock does, so
+# this waits minutes rather than seconds.
+wait_for_workers() {
+  local url attempt
+  for url in ${WORKER_URL_LIST[@]+"${WORKER_URL_LIST[@]}"}; do
+    for attempt in $(seq 1 "${WORKER_READY_TRIES:-600}"); do
+      if curl -sf "${url}/health" > /dev/null 2>&1; then
+        break
+      fi
+      if [ "$attempt" -eq "${WORKER_READY_TRIES:-600}" ]; then
+        echo "${url} did not come back after its reset" >&2
+        exit 1
+      fi
+      sleep 0.5
+    done
+  done
+  echo "all workers are answering again"
 }
 
 # vLLM's counters run for the life of the process, so an arm's own figures are
