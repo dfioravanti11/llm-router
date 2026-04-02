@@ -4,6 +4,34 @@ Notable changes to this project, newest first. Update this alongside any commit 
 
 Format per entry: `## YYYY-MM-DD — short title`, then a few bullets of what changed and why (link to the relevant roadmap release from `project_status.md` when applicable).
 
+## 2026-04-06 — First measurements against real vLLM, and a 40ms stall
+
+Ran on one NVIDIA L4 on GCE. Only one GPU was approved, so two vLLM servers
+shared it, each capped at 112 blocks with `--num-gpu-blocks-override` to
+reproduce the cache scarcity the mock uses. Cache behaviour is measurable that
+way. Latency is not, and is reported as unusable rather than left out.
+
+- **The cache result reproduced.** Round-robin 52.5% against the mock's 52.1%,
+  affinity 84.3% against the mock's 88.4%. The router's prompt rendering,
+  tokenizer, and block hash chain agree with a real engine. This was the largest
+  open risk in the project and it is now closed.
+- **The tail result did not.** The mock predicted p99 time to first token would
+  fall 2.7x. It did not move: 44.6ms against 45.4ms. Mean did improve by 11%,
+  which is recorded but not promoted, since the median and the tail are what the
+  policy is sold on.
+- **The predicted-versus-actual gap is +8.9 points**, with the router optimistic.
+  In-flight reservations and an eviction model that is not vLLM's are the likely
+  causes.
+- **A 40ms stall in the proxy path.** Measuring overhead against a real engine
+  said the router added 40.17ms at the median with a 0.63ms interval. A constant
+  that precise is a timer, and 40ms is Linux's delayed acknowledgement meeting
+  Nagle's algorithm. Neither socket had `TCP_NODELAY` set. Both do now. Loopback
+  on a laptop never triggered it; a real engine on a real network stack did.
+- The hit rate comparison counts blocks on one side and tokens on the other,
+  because that is what vLLM reports. The script says which is which now, and
+  warns when the two totals drift far enough apart to mean the sides saw
+  different traffic.
+
 ## 2026-03-18 — The benchmark scripts can target a real fleet
 
 - **The comparison scripts could only ever test mock workers.** They started

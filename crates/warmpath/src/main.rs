@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
+use axum::serve::ListenerExt;
 use clap::Parser;
 use tokio::net::TcpListener;
 use warmpath::{init_tracing, router, Config};
@@ -31,6 +32,22 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(name = %worker.name, url = %worker.url, "worker configured");
     }
     tracing::info!(%local_addr, "warmpath listening");
+
+    // Nagle's algorithm holds a small write back, waiting to coalesce it with
+    // the next one. The peer's delayed acknowledgement waits too. Together they
+    // stall for the length of the delayed-ack timer, which on Linux is 40ms.
+    //
+    // A streaming proxy writes small things constantly: response headers, then
+    // one SSE event per token. Every one of those is a candidate for the stall,
+    // and the first one lands squarely in time to first token.
+    //
+    // Measured against real vLLM on 2026-04-06, this cost 40.2ms at the median
+    // with an interval of 0.6ms. A constant that precise is a timer, not work.
+    let listener = listener.tap_io(|stream| {
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::warn!(%error, "could not disable Nagle on an accepted connection");
+        }
+    });
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

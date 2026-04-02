@@ -182,6 +182,87 @@ the spec names as the project's highest risk, and the reason the router now
 refuses to start when a configured model directory will not load rather than
 falling back.
 
+## Against real vLLM, on one L4
+
+**Date:** 2026-04-06. **Hardware:** one NVIDIA L4 on a GCE `g2-standard-8`,
+us-central1-a. **Engine:** vLLM 0.27.1, Qwen3-1.7B, `--block-size 16`,
+`--num-gpu-blocks-override 112`, `--max-model-len 1024`.
+
+Everything above this section ran against the mock worker. This section did not.
+
+Only one GPU was available, so two vLLM servers shared it, each capped at 112
+blocks to reproduce the cache scarcity the mock runs use. That arrangement makes
+cache behaviour measurable and latency not, because the two engines take turns on
+one device and the contention is larger than the effect. Both halves are reported
+below, and the second half is reported as unusable rather than left out.
+
+### The cache result reproduced
+
+| policy | hit rate, mock | hit rate, real vLLM |
+|---|---:|---:|
+| round-robin | 52.1% | 52.5% |
+| prefix-affinity-balanced | 88.4% | 84.3% |
+
+Three runs per policy. The router's model of prefix reuse holds up against a real
+engine, and the numbers land within a few points of the simulated ones.
+
+This also settles the question the whole milestone existed for. A worker cannot
+report a 52% hit rate on traffic a router scattered, nor 84% on traffic it
+gathered, unless the router is cutting blocks at the same boundaries the engine
+does. The prompt rendering, the tokenizer, and the block hash chain agree with
+vLLM.
+
+### The latency result did not reproduce
+
+| policy | p99 TTFT, mock | p99 TTFT, real vLLM |
+|---|---:|---:|
+| round-robin | 46.0 ms | 44.6 ms [44.3, 45.1] |
+| prefix-affinity-balanced | **17.2 ms** | 45.4 ms [44.9, 46.0] |
+
+The mock predicted the tail would improve by 2.7x. It did not move.
+
+Mean time to first token did improve, from 33.8ms to 30.0ms, and affinity won all
+three runs with no overlap between the groups. That is an 11% improvement in a
+statistic this project does not otherwise report, and it is recorded here for
+completeness rather than as a headline. The median and the tail are what the
+policy is sold on, and they did not move.
+
+Two things explain the shape. Hit rate is counted in blocks, so at 84% almost
+every request is a partial hit rather than a clean one, and every request still
+pays to be scheduled. And the fixed cost of being scheduled is large here,
+because two engines are sharing one device.
+
+A cache hit does save real time on this hardware. Sending the same 190-token
+prompt to an idle server three times gave 151ms, then 127ms, then 126ms. The
+25ms saved is real, and it is smaller than the contention this setup adds.
+
+### What this run cannot say
+
+Nothing about tail latency under cache-aware routing. Two engines on one GPU
+cannot show one worker saturating while another sits idle, which is the entire
+mechanism the skewed-traffic result depends on. That needs two devices.
+
+### The predicted-versus-actual gap
+
+**Command:** `make validate-hit-rate`
+
+| | rate | total |
+|---|---:|---:|
+| router predicted | 85.06% | 5,634 blocks |
+| workers reported | 76.15% | 92,959 tokens |
+| gap | **+8.91%** | |
+
+The router is optimistic by nine points. The likely causes are its in-flight
+reservations, which credit a worker with blocks a dispatched request has not
+finished writing, and an eviction model that is its own rather than vLLM's.
+
+The two totals count different things, which cost an hour to notice. vLLM counts
+prefix cache queries and hits in tokens; its help text says so. The router counts
+blocks. Converted at 16 tokens per block the router's 5,634 becomes 90,144
+against the engines' 92,959, a 3% difference, which is the agreement it should be
+rather than the 16x disagreement it looked like. The comparison script now labels
+each side and warns when the two totals drift apart.
+
 ## What the router itself costs
 
 ![Router overhead against direct-to-worker](docs/charts/router-overhead.png)
@@ -291,6 +372,35 @@ both views should agree, and they do.
 Agreement to a hundredth of a millisecond is the reason to believe the p50
 numbers at all.
 
+### A 40ms stall in the proxy, found by measuring against a real engine
+
+The first attempt to measure router overhead against vLLM said the router added
+**+40.17ms** at the median, with an interval of 0.63ms.
+
+A cost that constant is not work. Work scales with the prompt; a number that
+lands on the same tenth of a millisecond three runs running is a timer. Forty
+milliseconds is the length of one specific timer: Linux's delayed
+acknowledgement, which stalls exactly this long when it meets Nagle's algorithm
+on the other side.
+
+Nagle holds a small write back to see whether another one is coming. The peer
+holds its acknowledgement back for the same reason. Neither moves until the timer
+expires. A streaming proxy writes small things constantly, response headers and
+then one event per token, and the first of those writes is time to first token.
+
+Neither socket had `TCP_NODELAY` set. Not the connection from the client, not the
+connection to the worker. Both do now.
+
+This never showed against the mock worker, on a laptop, over loopback. It took a
+real engine on a real network stack to make it visible, which is the argument for
+the validation gate in one sentence.
+
+The overhead numbers in the section above were all measured through this stall
+and are therefore measurements of the stall. They stay as a record of what was
+found. What the router costs against a real engine is unmeasured, and the mock
+figures further up remain the only ones with the stall absent, since loopback on
+a laptop never triggered it.
+
 ## Closed-loop load generators under-report the tail
 
 ![Open loop against closed loop on the same worker](docs/charts/coordinated-omission.png)
@@ -364,8 +474,9 @@ worth reading.
 ## What is not measured yet
 
 - Anything on real hardware. R0.5.
-- The router's predicted hit rate against a worker's own reported hit rate,
-  where the worker is vLLM rather than a model of vLLM. R0.5.
+- ~~The router's predicted hit rate against a worker's own reported hit rate,
+  where the worker is vLLM rather than a model of vLLM.~~ Done on 2026-04-06.
+  The gap is +8.9 points, and the section above reports it.
 
   The router now exports what it predicted, as
   `warmpath_predicted_hit_blocks_total` over `warmpath_predicted_blocks_total`,

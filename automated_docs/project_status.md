@@ -9,10 +9,15 @@ approximate block index with in-flight reservation, polls each worker for queue
 depth and KV pressure, and chooses among six policies. Health checking, a single
 retry, and session affinity are in.
 
-R0.5 is the ship point, and everything in it that does not need a GPU is done:
-the compose stack runs and is verified, one command regenerates every published
-number and its charts, the design document exists, and the repository carries its
-licence. What remains is the GPU half, which is blocked on renting hardware.
+R0.5 is the ship point. Everything that does not need a GPU is done. The GPU
+half is now partly done: on 2026-04-06 the router ran against real vLLM on one
+L4, the prefix cache hit rate reproduced the simulated result, and the
+predicted-versus-actual gap was measured at +8.9 points. That closes the
+credibility gate the milestone was built around.
+
+What one GPU could not settle is latency. Two vLLM servers sharing one device
+contend hard enough to swamp the effect, so the tail comparison and the router's
+own overhead both remain unverified. They need two devices.
 
 ## Milestones
 
@@ -117,8 +122,15 @@ point at which the project is finished.
 6. Negative-results pass: at least one documented losing regime. Three are
    already in `RESULTS.md`, so this is mostly a matter of confirming they
    survive real workers.
-7. Re-run `make bench` on the real fleet and redraw the charts from it, so the
-   published numbers describe vLLM rather than a model of it.
+7. Re-measure router overhead now that the 40ms Nagle stall is fixed. Every
+   latency figure in `RESULTS.md` predates the fix, and all of them were taken
+   over loopback on a laptop where the stall never fired, so they are probably
+   unaffected. Probably is not measured.
+8. The tail latency comparison, on two separate GPUs. One device cannot show a
+   worker saturating while another idles, and that mechanism is what the skewed
+   traffic result rests on.
+9. The sub-millisecond p99 overhead figure, on machines that are not shared. It
+   has now failed to resolve three times for the same reason.
 
 ## Open risks to watch
 

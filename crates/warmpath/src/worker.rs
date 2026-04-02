@@ -87,6 +87,10 @@ impl WorkerPool {
         let client = reqwest::Client::builder()
             .connect_timeout(config.upstream.connect_timeout())
             .read_timeout(config.upstream.read_timeout())
+            // Same reasoning as the inbound side in `main.rs`. The request going
+            // up and every token coming back are small writes, and Nagle would
+            // hold each one waiting for company that never arrives.
+            .tcp_nodelay(true)
             // No compression features are enabled on the reqwest dependency, so
             // response bodies reach us exactly as the worker wrote them. That is
             // what makes byte-identical passthrough possible.

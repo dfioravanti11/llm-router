@@ -417,6 +417,55 @@ recovered 12GB. Worth recognising early: when several unrelated tools start
 failing in unrelated ways at the same moment, check the disk before debugging
 any of them.
 
+## The GPU session, 2026-04-06
+
+One L4, not the two that were asked for. The quota request for four came back
+approved for one. Two vLLM servers were run on the single device instead, each
+held to 112 blocks with `--num-gpu-blocks-override`, which reproduces the
+scarcity the mock runs are built around. Cache behaviour survives that
+arrangement. Latency does not, because the two engines take turns on one device
+and the contention is larger than anything routing could save.
+
+**The mock was right about the cache and wrong about the tail.** Hit rate came in
+at 52.5% and 84.3% against the mock's 52.1% and 88.4%, which is close enough to
+call a reproduction. Tail latency did not move at all, against a predicted 2.7x
+improvement. Nine months of tuning a policy against a simulator, and the
+simulator turned out to model the thing the policy controls and not the thing the
+policy is sold on. That asymmetry is the most useful thing the session produced,
+and it is only visible because both numbers were published rather than the
+flattering one.
+
+**The credibility gate passed.** A worker cannot report 52% on scattered traffic
+and 84% on gathered traffic unless the router cuts blocks where the engine cuts
+them. The prompt rendering, the tokenizer, and the block hash chain agree with
+vLLM. That was the largest open risk and it is closed.
+
+**A 40ms stall had been in the proxy the whole time.** The first overhead
+measurement said the router added 40.17ms at the median, interval 0.63ms. The
+constancy is the tell. Work varies with the prompt; a figure that lands on the
+same tenth of a millisecond three runs running is a timer, and 40ms is the length
+of Linux's delayed acknowledgement when it meets Nagle's algorithm. Neither
+socket had `TCP_NODELAY` set.
+
+Every latency number this project has ever published was measured on a laptop
+over loopback, where the stall never fires. The mock could not have found it. No
+test could have found it. It took a real engine on a real network stack, which is
+the argument for the validation gate stated as a single defect.
+
+**Units are a place to be paranoid.** The hit rate comparison read 85% against
+76% over totals of 5,634 and 92,959, which looks like the two sides measured
+different traffic. They did not. vLLM counts prefix cache queries in tokens and
+the router counts blocks, and 5,634 blocks is 90,144 tokens, which is within 3%
+of 92,959. The rates were always comparable because a fraction has no unit. The
+totals never were. An hour went into that.
+
+**What one GPU could not buy.** No tail latency comparison, no hotspot cost, and
+no verified sub-millisecond overhead. All three need two devices so that one
+worker can saturate while another idles. The p99 overhead figure has now been
+unverified across three separate attempts, on a laptop and on a shared GPU, and
+the reason has been the same every time: the noise floor of the machine is wider
+than the quantity.
+
 ---
 
 ## Scope change, spec v3.0
