@@ -452,6 +452,31 @@ over loopback, where the stall never fires. The mock could not have found it. No
 test could have found it. It took a real engine on a real network stack, which is
 the argument for the validation gate stated as a single defect.
 
+Setting `TCP_NODELAY` on both sockets removed it. The same measurement on the
+same hardware went from +40.17ms at the median to +1.84ms with an interval of
+2.17ms, which is unresolved. The router's cost against a real engine is now
+indistinguishable from zero at the median, and it agrees with the +1.20ms the
+mock has been reporting all along.
+
+**The first attempt to verify the fix tested nothing, and I caused that.** I told
+the user the GPU machine already had the code because I had pushed it. Pushing to
+GitHub does not update a clone on another machine. The rebuild printed `Finished
+in 0.22s`, which is cargo saying it had nothing to do, and the run reproduced the
+old number to within half a millisecond. Six minutes of a rented GPU went into
+re-measuring a binary that had not changed.
+
+Two lessons. A build that finishes in under a second has not built anything, and
+that line is worth reading before the results underneath it. And a fix is not
+deployed until the machine running it says so; the check costs one `grep` against
+the source that is actually on disk there.
+
+**Absolute numbers moved between sessions and the deltas did not.** The direct
+arm's median went from 3.70ms to 30.46ms between the two overhead runs, because
+the engine's cache state was different. Anyone comparing those two figures would
+conclude the machine got eight times slower. The controlled comparison is the
+difference between two arms inside one run, which is why the harness reports it
+that way and why the published table shows deltas.
+
 **Units are a place to be paranoid.** The hit rate comparison read 85% against
 76% over totals of 5,634 and 92,959, which looks like the two sides measured
 different traffic. They did not. vLLM counts prefix cache queries in tokens and

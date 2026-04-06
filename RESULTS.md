@@ -372,7 +372,7 @@ both views should agree, and they do.
 Agreement to a hundredth of a millisecond is the reason to believe the p50
 numbers at all.
 
-### A 40ms stall in the proxy, found by measuring against a real engine
+### A 40ms stall in the proxy, found and fixed by measuring against a real engine
 
 The first attempt to measure router overhead against vLLM said the router added
 **+40.17ms** at the median, with an interval of 0.63ms.
@@ -389,7 +389,22 @@ expires. A streaming proxy writes small things constantly, response headers and
 then one event per token, and the first of those writes is time to first token.
 
 Neither socket had `TCP_NODELAY` set. Not the connection from the client, not the
-connection to the worker. Both do now.
+connection to the worker. Both do now, and the fix was measured on the same
+hardware an hour later.
+
+| | before | after |
+|---|---:|---:|
+| added at p50 | +40.17 +/-0.63 ms | **+1.84 +/-2.17 ms, unresolved** |
+| added at p99 | +2.43 +/-0.92 ms | +2.18 +/-7.13 ms, unresolved |
+
+The stall is gone. What the router adds is now smaller than the interval around
+it, which is the same answer the mock gives, and the first time a real engine has
+agreed.
+
+Read the deltas, not the arms. Absolute latency moved between the two sessions,
+because the direct arm's median went from 3.70 ms to 30.46 ms as the engine's
+cache state changed underneath it. Only the difference between the two arms of a
+single run is a controlled comparison, and that is what the table above reports.
 
 This never showed against the mock worker, on a laptop, over loopback. It took a
 real engine on a real network stack to make it visible, which is the argument for
@@ -397,9 +412,7 @@ the validation gate in one sentence.
 
 The overhead numbers in the section above were all measured through this stall
 and are therefore measurements of the stall. They stay as a record of what was
-found. What the router costs against a real engine is unmeasured, and the mock
-figures further up remain the only ones with the stall absent, since loopback on
-a laptop never triggered it.
+found.
 
 ## Closed-loop load generators under-report the tail
 
@@ -477,6 +490,12 @@ worth reading.
 - ~~The router's predicted hit rate against a worker's own reported hit rate,
   where the worker is vLLM rather than a model of vLLM.~~ Done on 2026-04-06.
   The gap is +8.9 points, and the section above reports it.
+- The p99 overhead figure the spec asks for, which is under one millisecond.
+  Three attempts have now failed to resolve it, twice on a laptop and once on a
+  shared GPU, each time because the machine's own noise is wider than the
+  quantity. The last attempt put it at +2.18 ms with an interval of 7.13 ms. It
+  needs the generator, the router, and the worker on machines that are doing
+  nothing else.
 
   The router now exports what it predicted, as
   `warmpath_predicted_hit_blocks_total` over `warmpath_predicted_blocks_total`,

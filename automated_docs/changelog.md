@@ -22,11 +22,18 @@ way. Latency is not, and is reported as unusable rather than left out.
 - **The predicted-versus-actual gap is +8.9 points**, with the router optimistic.
   In-flight reservations and an eviction model that is not vLLM's are the likely
   causes.
-- **A 40ms stall in the proxy path.** Measuring overhead against a real engine
-  said the router added 40.17ms at the median with a 0.63ms interval. A constant
-  that precise is a timer, and 40ms is Linux's delayed acknowledgement meeting
-  Nagle's algorithm. Neither socket had `TCP_NODELAY` set. Both do now. Loopback
-  on a laptop never triggered it; a real engine on a real network stack did.
+- **A 40ms stall in the proxy path, found and fixed.** Measuring overhead against
+  a real engine said the router added 40.17ms at the median with a 0.63ms
+  interval. A constant that precise is a timer, and 40ms is Linux's delayed
+  acknowledgement meeting Nagle's algorithm. Neither socket had `TCP_NODELAY`
+  set. With both set, the same measurement on the same hardware puts the router
+  at +1.84ms with an interval of 2.17ms, which is unresolved and therefore
+  indistinguishable from zero. Loopback on a laptop never triggered the stall; a
+  real engine on a real network stack did.
+- The p99 overhead figure the spec asks for is still unresolved, now for the
+  third time, at +2.18ms with a 7.13ms interval. The reason has been the same
+  every time. The machine running the measurement is also running everything
+  being measured.
 - The hit rate comparison counts blocks on one side and tokens on the other,
   because that is what vLLM reports. The script says which is which now, and
   warns when the two totals drift far enough apart to mean the sides saw

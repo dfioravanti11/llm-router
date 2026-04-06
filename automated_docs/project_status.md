@@ -15,9 +15,13 @@ L4, the prefix cache hit rate reproduced the simulated result, and the
 predicted-versus-actual gap was measured at +8.9 points. That closes the
 credibility gate the milestone was built around.
 
-What one GPU could not settle is latency. Two vLLM servers sharing one device
-contend hard enough to swamp the effect, so the tail comparison and the router's
-own overhead both remain unverified. They need two devices.
+The same session found a 40ms stall in the proxy, caused by Nagle's algorithm on
+two sockets that never had `TCP_NODELAY` set, and fixed it. Loopback on a laptop
+had hidden it through every previous measurement.
+
+What one GPU could not settle is the tail comparison between policies. Two vLLM
+servers sharing one device contend hard enough to swamp the effect, and one
+device cannot show a worker saturating while another idles. That needs two GPUs.
 
 ## Milestones
 
@@ -122,10 +126,9 @@ point at which the project is finished.
 6. Negative-results pass: at least one documented losing regime. Three are
    already in `RESULTS.md`, so this is mostly a matter of confirming they
    survive real workers.
-7. Re-measure router overhead now that the 40ms Nagle stall is fixed. Every
-   latency figure in `RESULTS.md` predates the fix, and all of them were taken
-   over loopback on a laptop where the stall never fired, so they are probably
-   unaffected. Probably is not measured.
+7. ~~Re-measure router overhead now that the 40ms Nagle stall is fixed.~~ Done
+   on 2026-04-06. The router adds +1.84ms at the median with a 2.17ms interval,
+   which is unresolved, and it agrees with the mock's +1.20ms.
 8. The tail latency comparison, on two separate GPUs. One device cannot show a
    worker saturating while another idles, and that mechanism is what the skewed
    traffic result rests on.
