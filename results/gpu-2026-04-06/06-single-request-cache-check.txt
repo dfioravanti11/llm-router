@@ -1,0 +1,32 @@
+Does a prefix cache hit save measurable time on this hardware, with no router and
+no second server involved?
+
+The same prompt, three times, to one idle engine. The first is a miss. The second
+and third are hits.
+
+$ P=$(python3 -c "print('the cache is warm when the prefix already lives on this worker. ' * 12)")
+$ for i in 1 2 3; do
+    curl -s -o /dev/null -w "attempt $i  first byte %{time_starttransfer}s  total %{time_total}s\n" \
+      http://localhost:8000/v1/chat/completions \
+      -H 'content-type: application/json' \
+      -d "{\"model\":\"Qwen/Qwen3-1.7B\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"$P\"}]}"
+  done
+
+attempt 1  first byte 0.151312s  total 0.151387s
+attempt 2  first byte 0.126898s  total 0.126967s
+attempt 3  first byte 0.126332s  total 0.126403s
+
+About 190 prompt tokens. A hit saves 25ms, near enough 16% of the request.
+
+The saving is real and it is smaller than the contention two engines add when
+they share one device. That is why 02-policy-matrix.txt shows a large hit rate
+improvement and no latency improvement.
+
+Separately, confirming the engine generates what it is asked for rather than
+stopping early:
+
+$ curl -s localhost:8000/v1/chat/completions -H 'content-type: application/json' \
+    -d '{"model":"Qwen/Qwen3-1.7B","max_tokens":32,
+         "messages":[{"role":"user","content":"count to five"}]}'
+
+  "usage": {"prompt_tokens": 11, "total_tokens": 43, "completion_tokens": 32}

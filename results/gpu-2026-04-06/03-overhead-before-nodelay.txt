@@ -1,0 +1,44 @@
+Router overhead against one real engine. The second server was stopped so the two
+would not contend.
+
+$ sudo docker stop vllm-1
+$ WORKER_URL=http://127.0.0.1:8000 MODEL=Qwen/Qwen3-1.7B \
+  ARMS="direct prefix-affinity-balanced" \
+  RATE=4 DURATION=45 WARMUP=10 RUNS=3 \
+  OUT=results/gpu-overhead ./scripts/overhead.sh
+
+=== router overhead, 3 runs per arm at 4/s ===
+
+time to first token, from intended
+arm                                           p50                    p99
+direct                             3.63 +/-0.12ms        43.39 +/-0.45ms
+prefix-affinity-balanced          43.81 +/-0.62ms        45.82 +/-0.80ms
+-- added by the router                        p50                    p99
+prefix-affinity-balanced         +40.17 +/-0.63ms        +2.43 +/-0.92ms
+
+time to first token, from dispatch
+arm                                           p50                    p99
+direct                             2.41 +/-0.03ms        42.11 +/-0.26ms
+prefix-affinity-balanced          42.66 +/-0.36ms        44.06 +/-1.15ms
+-- added by the router                        p50                    p99
+prefix-affinity-balanced         +40.25 +/-0.36ms        +1.95 +/-1.18ms
+
+This is not a measurement of router overhead. It is a measurement of a bug.
+
+A cost of 40.17ms with an interval of 0.63ms is not work. Work scales with the
+prompt, and a figure that lands on the same tenth of a millisecond three runs
+running is a timer. Forty milliseconds is the length of one specific timer: the
+Linux delayed acknowledgement, which stalls exactly that long when it meets
+Nagle's algorithm on the other side.
+
+Nagle holds a small write back to see whether another is coming. The peer holds
+its acknowledgement back for the same reason. Neither moves until the timer
+fires. A streaming proxy writes small things constantly, headers and then one
+event per token, and the first of those writes is time to first token.
+
+Neither socket had TCP_NODELAY set. Not the connection from the client, not the
+connection to the worker.
+
+The direct arm is bimodal, which is the other half of the evidence: p50 of 2.41ms
+and p90 of 41.5ms. Roughly 85% of requests bypassing the router return in about
+two milliseconds. Every request through the router takes 42ms.

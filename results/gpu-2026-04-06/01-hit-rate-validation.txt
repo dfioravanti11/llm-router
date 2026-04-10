@@ -1,0 +1,53 @@
+The R0.5 gate. Does the router's own prediction match what the engines report?
+
+$ ./target/release/warmpath-bench run \
+    --target http://127.0.0.1:8080 --model Qwen/Qwen3-1.7B \
+    --rate 5 --duration 60 --warmup 10 --runs 1 --seed 1 \
+    --prompt-words 24 --max-tokens 32 \
+    --shared-prefix-words 256 --prefix-pool 10 \
+    --max-dispatch-lag-ms 500 --out results/gpu-validate
+
+INFO open-loop schedule built arrivals=313 rate=5.0 duration_secs=60.0
+1786837899057-open-loop-r5-s1 open-loop rate=5/s measured=263 p99 ttft=185.1ms valid
+
+achieved_rate_per_second       5.2
+dispatch_lag_p99_us         2016.0
+ttft_from_intended_p50_us  98751.0
+ttft_from_intended_p99_us 185087.0
+e2e_from_intended_p50_us 1172479.0
+
+The run is valid: p99 dispatch lag of 2ms against a 500ms budget, so the
+generator kept its schedule. End to end median of 1.17 seconds is real decode on
+a contended L4, at 32 output tokens.
+
+Router policy was prefix-affinity-balanced across both servers. A cache-blind
+policy builds no fingerprint and would leave nothing to validate.
+
+$ ROUTER=http://127.0.0.1:8080 \
+  WORKERS="http://127.0.0.1:8000 http://127.0.0.1:8001" \
+  ./scripts/validate-hit-rate.sh
+
+prefix cache hit rate
+  router predicted    85.06%   over 5,634 blocks routed
+  workers reported    76.15%   over 92,959 blocks looked up
+  gap                 +8.91%
+
+VERDICT: the router is optimistic. It believed the workers held more
+than they did, so requests were routed for hits that did not happen.
+
+Two notes on reading this.
+
+The script labelled both totals "blocks". Only one of them is. vLLM counts
+tokens. 5,634 blocks at 16 tokens each is 90,144 tokens against the engines'
+92,959, a 3% difference, which means both sides saw the same traffic. The 16x
+disagreement it appears to show is a unit error in the label, not in the data.
+Both rates are fractions, so the comparison of rates was always sound. The script
+was corrected afterwards to name the units and to warn when the two totals drift
+far enough apart to mean the sides saw different requests.
+
+The +8.9 point gap is real. The likely causes are the in-flight reservation,
+which credits a worker with blocks a dispatched request has not finished writing,
+and an eviction model that is the router's own rather than vLLM's.
+
+What this settles: the router's prompt rendering, tokenizer, and block hash chain
+agree with a real engine. A worker cannot report 76% on this traffic otherwise.

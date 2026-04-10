@@ -14,8 +14,9 @@ Regenerate with `make bench`.
 
 ## Status
 
-R0.4. Prefix-affinity routing works, and the conditions under which it works
-are measured. On even traffic with room in the fleet, balanced affinity cuts
+R0.5. Prefix-affinity routing works, the conditions under which it works are
+measured, and the cache behaviour has now been checked against real vLLM on an
+L4. The hit rate reproduced. The tail latency improvement did not. On even traffic with room in the fleet, balanced affinity cuts
 p99 time to first token from 46.0ms to 17.2ms against round-robin, with
 non-overlapping confidence intervals.
 
@@ -69,6 +70,7 @@ Not built yet: real vLLM, which is the whole of R0.5 and the ship point.
 | `compose.yaml` | Router, three mock workers, Prometheus, Grafana |
 | `docs/DESIGN.md` | Decisions, their costs, and what breaks at 100 workers |
 | `docs/GPU-RUNBOOK.md` | The R0.5 validation session, in the order to do it |
+| `results/gpu-2026-04-06/` | The real vLLM session, as console transcripts |
 | `Dockerfile` | Builds the router and the mock worker into one image |
 | `scripts/reproduce.sh` | Regenerates every published number, behind `make bench` |
 | `scripts/plot.py` | Redraws every chart from committed data |

@@ -303,6 +303,5 @@ way. Latency is not, and is reported as unusable rather than left out.
 
 ## 2026-02-01 — Project scaffolding
 - Repo initialized. Added `README.md`, `project_spec.md` (v2.0, full product + engineering spec), `writing_prompt.md` (prose style rules), `.env.example`.
-- Added `CLAUDE.md` with architecture summary and engineering requirements for AI-assisted development.
 - Added `automated_docs/` (`architecture.md`, `changelog.md`, `project_status.md`) to track live architecture and progress against the R0.1–R1.0+ roadmap.
 - No application code yet. Next milestone is R0.1 — Skeleton (see `project_status.md`).

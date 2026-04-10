@@ -1,0 +1,38 @@
+An attempt to verify the TCP_NODELAY fix, which verified nothing.
+
+$ WORKER_URL=http://127.0.0.1:8000 MODEL=Qwen/Qwen3-1.7B \
+  ARMS="direct prefix-affinity-balanced" \
+  RATE=4 DURATION=45 WARMUP=10 RUNS=3 \
+  OUT=results/gpu-overhead-nodelay ./scripts/overhead.sh
+
+using the model tokenizer at .cache/qwen3-1.7b
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.22s
+
+=== router overhead, 3 runs per arm at 4/s ===
+
+time to first token, from intended
+arm                                           p50                    p99
+direct                             3.70 +/-0.13ms        43.39 +/-0.59ms
+prefix-affinity-balanced          43.36 +/-0.93ms        45.22 +/-0.88ms
+-- added by the router                        p50                    p99
+prefix-affinity-balanced         +39.66 +/-0.94ms        +1.82 +/-1.06ms
+
+time to first token, from dispatch
+arm                                           p50                    p99
+direct                             2.41 +/-0.02ms        42.24 +/-0.35ms
+prefix-affinity-balanced          42.59 +/-0.18ms        44.13 +/-1.15ms
+-- added by the router                        p50                    p99
+prefix-affinity-balanced         +40.18 +/-0.18ms        +1.89 +/-1.21ms
+
+The fix was committed and pushed to GitHub. The machine running this had not
+pulled it, so this is the same binary as 03, measured again.
+
+The tell is in the second line of output. `Finished in 0.22s` is cargo saying it
+had nothing to compile. A build that installs a change to the proxy's socket
+setup takes a minute or two on eight cores.
+
+The cause was an instruction that said the machine already had the code because
+it had been pushed. Pushing to a remote does not update a clone. Six minutes of a
+rented GPU went into re-measuring an unchanged binary, and the result reproduced
+the previous one to within half a millisecond, which is exactly what an unchanged
+binary should do.

@@ -470,6 +470,19 @@ that line is worth reading before the results underneath it. And a fix is not
 deployed until the machine running it says so; the check costs one `grep` against
 the source that is actually on disk there.
 
+**The raw data from the only real-hardware session was lost.** The harness wrote
+its run directories onto the rented machine, the machine was deleted, and nobody
+copied them off first. This project's central claim about itself is that every
+published number carries its config, its seed, its git SHA and its raw output,
+and the newest and most interesting numbers now carry console transcripts
+instead. They are committed under `results/gpu-2026-04-06/` with a README naming
+what is missing, which is honest and is still worse than having the files.
+
+The teardown instruction should have led with copying the results off. It led
+with deleting the instance to stop the billing. Cost of the mistake: nothing that
+can be recomputed, and a permanent asterisk on the section a sceptical reader
+will check first.
+
 **Absolute numbers moved between sessions and the deltas did not.** The direct
 arm's median went from 3.70ms to 30.46ms between the two overhead runs, because
 the engine's cache state was different. Anyone comparing those two figures would

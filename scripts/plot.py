@@ -852,11 +852,92 @@ def chart_overhead():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# chart 5: what the mock got right and what it got wrong
+# ---------------------------------------------------------------------------
+
+GPU_SUMMARY = os.path.join(RESULTS, "gpu-2026-04-06", "summary.json")
+
+
+def chart_mock_versus_real():
+    """The mock's prediction against a real engine, on both axes it claims.
+
+    Two panels rather than one, because the two quantities share no unit and
+    putting a percentage next to a millisecond on one axis would be a lie of
+    presentation. Read them together: the same policy, the same workload shape,
+    one quantity reproduced and the other did not.
+    """
+    require(GPU_SUMMARY)
+    with open(GPU_SUMMARY) as handle:
+        data = json.load(handle)
+
+    policies = ["round-robin", "prefix-affinity-balanced"]
+    short = {"round-robin": "round-robin", "prefix-affinity-balanced": "affinity"}
+
+    fig, (ax_hit, ax_tail) = plt.subplots(1, 2, figsize=(9.4, 3.9))
+
+    y = list(range(len(policies)))
+    height = 0.34
+
+    for ax, key, unit, title, subtitle in (
+        (ax_hit, "hit_rate", "%", "Prefix cache hit rate",
+         "The mock was right. Within four points on both policies."),
+        (ax_tail, "p99_ttft_ms", " ms", "p99 time to first token",
+         "The mock was wrong. It promised the tail would fall by 2.7x."),
+    ):
+        for offset, source, face, edge in (
+            (height / 2, "mock", "white", "#444444"),
+            (-height / 2, "real", "#444444", "#444444"),
+        ):
+            values = [data[key][name][source] for name in policies]
+            bars = ax.barh(
+                [pos + offset for pos in y], values, height=height,
+                color=face, edgecolor=edge, linewidth=0.9,
+                hatch="////" if source == "mock" else None,
+                label="mock worker" if source == "mock" else "real vLLM",
+                zorder=3,
+            )
+            for bar, value in zip(bars, values):
+                ax.text(
+                    bar.get_width() + max(values) * 0.02,
+                    bar.get_y() + bar.get_height() / 2,
+                    ("%.1f" % value) + unit,
+                    va="center", fontsize=8, color="#222222",
+                )
+
+        ax.set_yticks(y)
+        ax.set_yticklabels([short[name] for name in policies])
+        ax.invert_yaxis()
+        ax.set_xlim(0, max(
+            data[key][name][source] for name in policies for source in ("mock", "real")
+        ) * 1.28)
+        ax.grid(axis="x", zorder=0)
+        ax.set_axisbelow(True)
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        titled(ax, title, subtitle)
+
+    # The band between the two policy groups is the only space no bar reaches.
+    ax_hit.legend(loc="center right", frameon=True, framealpha=0.95)
+
+    fig.text(
+        0.5, -0.06,
+        "Three runs per policy on each side. Real vLLM 0.27.1 serving Qwen3-1.7B "
+        "on one L4, two engines sharing the device,\nwhich is why the latency "
+        "panel is contended and is published as unusable rather than left out.",
+        ha="center", fontsize=7.4, color=GREY, linespacing=1.4,
+    )
+
+    fig.tight_layout()
+    return save(fig, "mock-versus-real.png")
+
+
 CHART_FUNCS = (
     ("even workload tail", chart_even),
     ("skewed workload hotspot", chart_skewed),
     ("coordinated omission", chart_coordinated_omission),
     ("router overhead", chart_overhead),
+    ("mock against real vLLM", chart_mock_versus_real),
 )
 
 

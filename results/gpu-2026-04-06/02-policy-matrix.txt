@@ -1,0 +1,56 @@
+Round-robin against prefix-affinity-balanced, on two real vLLM servers.
+
+$ WORKER_URLS="http://127.0.0.1:8000 http://127.0.0.1:8001" \
+  MODEL=Qwen/Qwen3-1.7B WORKERS=2 \
+  POLICIES="round-robin prefix-affinity-balanced" \
+  RATE=5 DURATION=60 WARMUP=10 RUNS=3 CACHE_BLOCKS=112 \
+  OUT=results/gpu-matrix ./scripts/policy-compare.sh
+
+Six runs, seeds 101 to 103 per policy, arms interleaved so neither always runs
+first. Every run reported valid, with p99 dispatch lag near 2ms.
+
+Per-run time to first token, from intended, in microseconds:
+
+  policy                    seed 101   seed 102   seed 103
+  round-robin      mean      33479.8    34976.5    33809.0
+  affinity         mean      30514.0    29989.9    29101.9
+
+  round-robin      p50       42815.0    42719.0    42687.0
+  affinity         p50       43615.0    43647.0    43327.0
+
+  round-robin      p99       44607.0    44863.0    44575.0
+  affinity         p99       45439.0    45279.0    45727.0
+
+=== even workload ===
+policy                      throughput   p50 TTFT   p99 TTFT          95% CI on p99  hit rate  busiest
+round-robin                     5.2/s     42.7ms     44.6ms        [44.3, 45.1] ms     52.5%      50%
+prefix-affinity-balanced        5.2/s     43.6ms     45.4ms        [44.9, 46.0] ms     84.3%      51%
+
+3 run(s) per policy. 'busiest' is the share of requests the busiest
+worker took; a third is even across three workers.
+
+Reading it against the mock, which ran three workers on the same workload shape:
+
+  hit rate    round-robin   52.1% mock   52.5% real
+  hit rate    affinity      88.4% mock   84.3% real
+  p99 TTFT    round-robin   46.0ms mock  44.6ms real
+  p99 TTFT    affinity      17.2ms mock  45.4ms real
+
+The cache result reproduced. The tail result did not. The mock predicted affinity
+would cut p99 by 2.7x and it did not move at all.
+
+Mean did improve, from 33.8ms to 30.0ms, and affinity won every run with no
+overlap between the two groups. That is 11% on a statistic this project does not
+otherwise report. It is recorded rather than promoted, because the median and the
+tail are what the policy is sold on.
+
+Why the mean moves and the percentiles do not: hit rate is counted in blocks, so
+at 84% almost every request is a partial hit rather than a clean one, and every
+request still pays to be scheduled. On this machine the cost of being scheduled
+is large, because two engines are sharing one device. See
+06-single-request-cache-check.txt for the same effect measured without the
+contention, where a hit saves 25ms of 151ms.
+
+This run cannot say anything about tail latency under cache-aware routing. One
+device cannot show a worker saturating while another idles, and that mechanism is
+what the skewed-traffic result depends on.

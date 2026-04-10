@@ -237,7 +237,7 @@ Warmpath is an OpenAI-compatible HTTP proxy in front of N LLM inference workers 
 axum/hyper server exposing `/v1/chat/completions` and `/v1/completions`, streaming and non-streaming. Byte-faithful SSE passthrough; backpressure applied end to end; client disconnect cancels the upstream request and frees the worker slot within one token interval.
 
 ### Prompt builder
-Applies the target model's chat template to the full conversation (not just the latest message — see prior-art bug in `CLAUDE.md`), tokenizes with the HF `tokenizers` crate, and computes a vLLM-compatible block hash chain (parent hash + block tokens, 16-token blocks by default). Per-session tokenizer caching avoids re-tokenizing history on every turn.
+Applies the target model's chat template to the full conversation rather than the latest message alone, which is a known bug class in this space, tokenizes with the HF `tokenizers` crate, and computes a vLLM-compatible block hash chain (parent hash + block tokens, 16-token blocks by default). Per-session tokenizer caching avoids re-tokenizing history on every turn.
 
 ### Block index
 Hash → {worker} mapping, one trait with two backends:

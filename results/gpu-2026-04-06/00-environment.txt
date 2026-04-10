@@ -1,0 +1,52 @@
+$ nvidia-smi
+Sat Aug 15 23:29:10 2026
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.173.02             Driver Version: 580.173.02     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+|   0  NVIDIA L4                      On  |   00000000:00:03.0 Off |                    0 |
+| N/A   43C    P8             14W /   72W |       0MiB /  23034MiB |      0%      Default |
++-----------------------------------------+------------------------+----------------------+
+
+Both servers were started with:
+
+  docker run --gpus all -d -p 8000:8000 \
+    -e VLLM_SERVER_DEV_MODE=1 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:latest \
+    --model Qwen/Qwen3-1.7B --block-size 16 \
+    --gpu-memory-utilization 0.35 \
+    --num-gpu-blocks-override 112 --max-model-len 1024
+
+The second is identical except for the container name and host port 8001.
+
+VLLM_SERVER_DEV_MODE=1 is what exposes POST /reset_prefix_cache, which the
+comparison script calls between arms so each policy starts with an empty cache.
+The route is absent without it.
+
+Startup lines that matter, from `docker logs vllm-0`:
+
+  version 0.27.1
+  model   Qwen/Qwen3-1.7B
+  non-default args: {'model': 'Qwen/Qwen3-1.7B', 'max_model_len': 1024,
+    'block_size': 16, 'gpu_memory_utilization': 0.35,
+    'num_gpu_blocks_override': 112}
+  Initializing a V1 LLM engine (v0.27.1) ... enable_prefix_caching=True
+  Available KV cache memory: 3.05 GiB
+  Overriding num_gpu_blocks=1783 with num_gpu_blocks_override=112
+  GPU KV cache size: 1,792 tokens
+  Maximum concurrency for 1,024 tokens per request: 1.75x
+
+The override is the load-bearing flag. Left alone, an L4 holds 1,783 blocks for a
+model this small, which is roughly fifty times the working set of ten 256-word
+prefixes. Nothing would ever be evicted and no routing policy could distinguish
+itself. 112 blocks is what the mock runs use.
+
+With both servers up, 9650 MiB of 23034 MiB was in use.
+
+$ curl -s localhost:8000/metrics | grep prefix_cache
+vllm:prefix_cache_queries_total{engine="0",model_name="Qwen/Qwen3-1.7B"} 0.0
+vllm:prefix_cache_hits_total{engine="0",model_name="Qwen/Qwen3-1.7B"} 0.0
+
+Note the help text on those two counters: "in terms of number of queried tokens"
+and "in terms of number of cached tokens". vLLM counts tokens. The router counts
+blocks. See 01-hit-rate-validation.txt.

@@ -190,6 +190,15 @@ us-central1-a. **Engine:** vLLM 0.27.1, Qwen3-1.7B, `--block-size 16`,
 
 Everything above this section ran against the mock worker. This section did not.
 
+![What the mock got right and what it got wrong](docs/charts/mock-versus-real.png)
+
+**The raw output is console transcripts, not run directories.** The harness wrote
+its usual `report.json` and per-request records onto the rented machine, and the
+machine was deleted before anyone copied them off. What survives is in
+`results/gpu-2026-04-06/`, with a README saying exactly what is missing. Every
+other number in this file is backed by real run directories. This section is the
+exception and is labelled as one.
+
 Only one GPU was available, so two vLLM servers shared it, each capped at 112
 blocks to reproduce the cache scarcity the mock runs use. That arrangement makes
 cache behaviour measurable and latency not, because the two engines take turns on

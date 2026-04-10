@@ -1,0 +1,42 @@
+The same measurement with the fix actually built.
+
+$ git fetch origin && git reset --hard origin/main
+$ grep -n 'tcp_nodelay\|tap_io' crates/warmpath/src/main.rs crates/warmpath/src/worker.rs
+$ cargo build --release --workspace
+$ WORKER_URL=http://127.0.0.1:8000 MODEL=Qwen/Qwen3-1.7B \
+  ARMS="direct prefix-affinity-balanced" \
+  RATE=4 DURATION=45 WARMUP=10 RUNS=3 \
+  OUT=results/gpu-overhead-nodelay2 ./scripts/overhead.sh
+
+=== router overhead, 3 runs per arm at 4/s ===
+
+time to first token, from intended
+arm                                           p50                    p99
+direct                            30.46 +/-2.04ms        47.36 +/-1.84ms
+prefix-affinity-balanced          32.30 +/-0.74ms        49.53 +/-6.89ms
+-- added by the router                        p50                    p99
+prefix-affinity-balanced   +1.84 +/-2.17ms unresolved +2.18 +/-7.13ms unresolved
+
+time to first token, from dispatch
+arm                                           p50                    p99
+direct                            29.66 +/-1.99ms        46.59 +/-1.95ms
+prefix-affinity-balanced          31.07 +/-1.02ms        47.81 +/-7.77ms
+-- added by the router                        p50                    p99
+prefix-affinity-balanced   +1.41 +/-2.24ms unresolved +1.22 +/-8.01ms unresolved
+
+The stall is gone. What the router adds went from 40.17ms to 1.84ms, and the
+interval around it contains zero, so this setup cannot tell it apart from
+nothing. That agrees with the 1.20ms the mock has reported all along, and it is
+the first time a real engine has agreed with it.
+
+Read the deltas, not the arms. The direct arm's median moved from 3.63ms in run
+03 to 30.46ms here, because the engine's cache state was different by this point
+in the session. Comparing those two absolute figures would say the machine got
+eight times slower. It did not. The controlled comparison is the difference
+between two arms inside a single run, which is what the harness prints and what
+gets published.
+
+The p99 the spec asks for, under one millisecond, is still unresolved. That is
+now three attempts, twice on a laptop and once here, and the reason has been the
+same every time: the machine doing the measuring is also running everything being
+measured.

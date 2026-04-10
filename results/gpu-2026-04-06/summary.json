@@ -1,0 +1,31 @@
+{
+  "_comment": "Headline numbers from the 2026-04-06 GPU session. Transcribed from the console output in this directory, because the machine was deleted before the harness run directories were copied off it. scripts/plot.py reads this to draw docs/charts/mock-versus-real.png.",
+  "hardware": "1x NVIDIA L4, GCE g2-standard-8, us-central1-a",
+  "engine": "vLLM 0.27.1, Qwen3-1.7B, block_size 16, num_gpu_blocks_override 112",
+  "runs_per_policy": 3,
+  "note": "Two vLLM servers shared one GPU. Cache figures are sound. Latency figures are contended and are published as unusable.",
+  "hit_rate": {
+    "round-robin": {"mock": 52.1, "real": 52.5},
+    "prefix-affinity-balanced": {"mock": 88.4, "real": 84.3}
+  },
+  "p99_ttft_ms": {
+    "round-robin": {"mock": 46.0, "real": 44.6, "real_ci": [44.3, 45.1]},
+    "prefix-affinity-balanced": {"mock": 17.2, "real": 45.4, "real_ci": [44.9, 46.0]}
+  },
+  "mean_ttft_ms_real": {
+    "round-robin": [33.5, 35.0, 33.8],
+    "prefix-affinity-balanced": [30.5, 30.0, 29.1]
+  },
+  "predicted_versus_actual": {
+    "router_predicted_rate": 85.06,
+    "workers_reported_rate": 76.15,
+    "gap_points": 8.91,
+    "router_blocks": 5634,
+    "worker_tokens": 92959,
+    "block_size": 16
+  },
+  "router_overhead_ms": {
+    "before_nodelay": {"p50": 40.17, "p50_ci_half": 0.63, "p99": 2.43, "p99_ci_half": 0.92},
+    "after_nodelay": {"p50": 1.84, "p50_ci_half": 2.17, "p99": 2.18, "p99_ci_half": 7.13}
+  }
+}
